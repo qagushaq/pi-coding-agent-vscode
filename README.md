@@ -1,5 +1,7 @@
 # Pi Coding Agent VS Code
 
+**Language / Язык:** English | [Русский](README.ru.md)
+
 VS Code extension wrapper for [Pi Coding Agent](https://github.com/earendil-works/pi-coding-agent) RPC mode.
 
 ## Current MVP
