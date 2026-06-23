@@ -115,6 +115,9 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
         case 'restart':
           await this.restartActive();
           break;
+        case 'renameTask':
+          await this.renameActive();
+          break;
         case 'setModel':
           this.setModel(String(msg.modelId || ''));
           break;
@@ -167,7 +170,26 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
   stopActive() {
     const rpc = this.activeRpc();
     rpc?.send({ type: 'abort' });
-    this.activeTask()?.messages.push({ id: `sys-${Date.now()}`, role: 'system', text: 'Abort sent' });
+    const task = this.activeTask();
+    if (task) {
+      task.streaming = false;
+      task.messages.push({ id: `sys-${Date.now()}`, role: 'system', text: 'Abort sent' });
+    }
+    this.postState();
+  }
+
+  async renameActive() {
+    const task = this.activeTask();
+    const rpc = this.activeRpc();
+    if (!task) return;
+    const name = await vscode.window.showInputBox({
+      title: 'Rename Pi Code task',
+      value: task.name,
+      prompt: 'Task name shown in the Pi Code sidebar',
+    });
+    if (!name?.trim()) return;
+    task.name = name.trim();
+    rpc?.send({ type: 'set_session_name', name: task.name });
     this.postState();
   }
 
@@ -317,6 +339,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
   .task{padding:8px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .task.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
   .task small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:var(--muted)}.dot.running{background:#75E6A7}.dot.error{background:var(--vscode-errorForeground)}
   .main{flex:1;display:flex;flex-direction:column;min-width:0}
   .toolbar{display:flex;gap:6px;padding:8px;border-bottom:1px solid var(--border);align-items:center}
   button{background:var(--accent);color:var(--accentFg);border:0;padding:5px 9px;border-radius:3px;cursor:pointer}
@@ -335,7 +358,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
   .row{display:flex;gap:6px;align-items:center}.grow{flex:1}.attachments{font-size:12px;color:var(--muted)}
 </style></head>
 <body>
-  <div class="tasks"><div class="toolbar"><button id="newTask">New</button><button class="secondary" id="restart">Restart</button></div><div id="tasks"></div></div>
+  <div class="tasks"><div class="toolbar"><button id="newTask">New</button><button class="secondary" id="rename">Rename</button><button class="secondary" id="restart">Restart</button></div><div id="tasks"></div></div>
   <div class="main">
     <div class="toolbar"><select id="models"><option value="">Model</option></select><button class="secondary" id="stop">Stop</button><span class="grow"></span><span id="status"></span></div>
     <div class="messages" id="messages"></div>
@@ -348,13 +371,13 @@ vscode.postMessage({type:'ready'});
 window.addEventListener('message',e=>{const m=e.data;if(m.type==='state'){state=m;render();} if(m.type==='models'){models=m.models||[];renderModels();} if(m.type==='attachedImages'){pendingImages=[...pendingImages,...(m.images||[])];renderAttachments();}});
 function render(){renderTasks();renderMessages();renderStatus();}
 function active(){return state.tasks.find(t=>t.id===state.activeTaskId)}
-function renderTasks(){el('tasks').innerHTML=state.tasks.map(t=>'<div class="task '+(t.id===state.activeTaskId?'active':'')+'" data-id="'+t.id+'">'+esc(t.name)+'<small>'+(t.streaming?'running':'idle')+(t.model?' · '+esc(t.model):'')+'</small></div>').join('');document.querySelectorAll('.task').forEach(n=>n.onclick=()=>vscode.postMessage({type:'switchTask',taskId:n.dataset.id}));}
+function renderTasks(){el('tasks').innerHTML=state.tasks.map(t=>{const last=[...(t.messages||[])].reverse().find(m=>m.role==='error');const status=last?'error':(t.streaming?'running':'idle');return '<div class="task '+(t.id===state.activeTaskId?'active':'')+'" data-id="'+t.id+'">'+esc(t.name)+'<small><span class="dot '+status+'"></span>'+status+(t.model?' · '+esc(t.model):'')+'</small></div>'}).join('');document.querySelectorAll('.task').forEach(n=>n.onclick=()=>vscode.postMessage({type:'switchTask',taskId:n.dataset.id}));}
 function renderMessages(){const t=active();el('messages').innerHTML=!t?'':t.messages.map(m=>'<div class="msg '+m.role+'"><div class="role">'+esc(m.role)+(m.toolName?' · '+esc(m.toolName):'')+(m.status?' · '+esc(m.status):'')+'</div>'+esc(m.text)+'</div>').join('');el('messages').scrollTop=el('messages').scrollHeight;}
 function renderStatus(){const t=active();el('status').textContent=t?(t.streaming?'Running':'Idle'):'';}
 function renderModels(){el('models').innerHTML='<option value="">Model</option>'+models.map(m=>'<option value="'+escAttr((m.provider?m.provider+'/':'')+m.id)+'">'+esc((m.name||m.id)+' · '+(m.provider||''))+'</option>').join('');}
 function renderAttachments(){el('attachments').textContent=pendingImages.length?('Attached: '+pendingImages.map(i=>i.fileName||i.mimeType).join(', ')):'';}
 function send(){const text=el('input').value.trim();if(!text)return;vscode.postMessage({type:'send',text,images:pendingImages.map(i=>({type:'image',data:i.data,mimeType:i.mimeType}))});el('input').value='';pendingImages=[];renderAttachments();}
-el('send').onclick=send;el('newTask').onclick=()=>vscode.postMessage({type:'newTask'});el('stop').onclick=()=>vscode.postMessage({type:'stop'});el('restart').onclick=()=>vscode.postMessage({type:'restart'});el('attach').onclick=()=>vscode.postMessage({type:'attachImage'});el('models').onchange=e=>vscode.postMessage({type:'setModel',modelId:e.target.value});el('input').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();});
+el('send').onclick=send;el('newTask').onclick=()=>vscode.postMessage({type:'newTask'});el('stop').onclick=()=>vscode.postMessage({type:'stop'});el('restart').onclick=()=>vscode.postMessage({type:'restart'});el('rename').onclick=()=>vscode.postMessage({type:'renameTask'});el('attach').onclick=()=>vscode.postMessage({type:'attachImage'});el('models').onchange=e=>vscode.postMessage({type:'setModel',modelId:e.target.value});el('input').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();});
 function esc(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}function escAttr(s){return esc(s).replace(/"/g,'&quot;');}
 </script></body></html>`;
   }
