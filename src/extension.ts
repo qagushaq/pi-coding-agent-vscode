@@ -15,6 +15,8 @@ type Task = {
   buffer: string;
   streaming: boolean;
   model?: string;
+  sessionFile?: string;
+  sessionId?: string;
   messages: UiMessage[];
 };
 
@@ -118,6 +120,12 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
         case 'renameTask':
           await this.renameActive();
           break;
+        case 'copySessionPath':
+          await this.copySessionPath();
+          break;
+        case 'exportHtml':
+          this.exportActiveHtml();
+          break;
         case 'setModel':
           this.setModel(String(msg.modelId || ''));
           break;
@@ -191,6 +199,21 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     task.name = name.trim();
     rpc?.send({ type: 'set_session_name', name: task.name });
     this.postState();
+  }
+
+  async copySessionPath() {
+    const task = this.activeTask();
+    if (!task?.sessionFile) {
+      vscode.window.showInformationMessage('Pi session path is not available yet.');
+      return;
+    }
+    await vscode.env.clipboard.writeText(task.sessionFile);
+    vscode.window.showInformationMessage('Pi session path copied.');
+  }
+
+  exportActiveHtml() {
+    const rpc = this.activeRpc();
+    rpc?.send({ type: 'export_html' });
   }
 
   async restartActive() {
@@ -284,6 +307,15 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
       if (event.command === 'get_available_models' && event.success) {
         this.view?.webview.postMessage({ type: 'models', models: event.data?.models || [] });
       }
+      if (event.command === 'get_state' && event.success) {
+        task.sessionFile = event.data?.sessionFile || task.sessionFile;
+        task.sessionId = event.data?.sessionId || task.sessionId;
+        task.model = event.data?.model?.provider && event.data?.model?.id ? `${event.data.model.provider}/${event.data.model.id}` : task.model;
+      }
+      if (event.command === 'export_html' && event.success) {
+        const exportedPath = event.data?.path;
+        task.messages.push({ id: `sys-${Date.now()}`, role: 'system', text: exportedPath ? `Exported HTML: ${exportedPath}` : 'Exported HTML.' });
+      }
       if (event.command === 'set_model' && event.success) {
         task.model = event.data?.provider && event.data?.id ? `${event.data.provider}/${event.data.id}` : task.model;
       }
@@ -323,6 +355,8 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
       cwd: r.task.cwd,
       streaming: r.task.streaming,
       model: r.task.model,
+      sessionFile: r.task.sessionFile,
+      sessionId: r.task.sessionId,
       messages: r.task.messages,
     }));
     this.view?.webview.postMessage({ type: 'state', activeTaskId: this.activeTaskId, tasks });
@@ -356,11 +390,13 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
   .composer{border-top:1px solid var(--border);padding:8px;display:flex;flex-direction:column;gap:6px}
   textarea{height:78px;resize:vertical;background:var(--input);color:var(--fg);border:1px solid var(--border);padding:8px;font-family:var(--vscode-font-family)}
   .row{display:flex;gap:6px;align-items:center}.grow{flex:1}.attachments{font-size:12px;color:var(--muted)}
+  .meta{padding:6px 8px;border-bottom:1px solid var(--border);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style></head>
 <body>
   <div class="tasks"><div class="toolbar"><button id="newTask">New</button><button class="secondary" id="rename">Rename</button><button class="secondary" id="restart">Restart</button></div><div id="tasks"></div></div>
   <div class="main">
-    <div class="toolbar"><select id="models"><option value="">Model</option></select><button class="secondary" id="stop">Stop</button><span class="grow"></span><span id="status"></span></div>
+    <div class="toolbar"><select id="models"><option value="">Model</option></select><button class="secondary" id="stop">Stop</button><button class="secondary" id="copySession">Copy session</button><button class="secondary" id="exportHtml">Export HTML</button><span class="grow"></span><span id="status"></span></div>
+    <div class="meta" id="meta"></div>
     <div class="messages" id="messages"></div>
     <div class="composer"><div class="attachments" id="attachments"></div><textarea id="input" placeholder="Ask Pi..."></textarea><div class="row"><button id="send">Send</button><button class="secondary" id="attach">Attach image</button><span class="grow"></span><span class="attachments">Ctrl/Cmd+Enter to send</span></div></div>
   </div>
@@ -369,15 +405,16 @@ const vscode=acquireVsCodeApi();let state={tasks:[],activeTaskId:null};let model
 const el=id=>document.getElementById(id);
 vscode.postMessage({type:'ready'});
 window.addEventListener('message',e=>{const m=e.data;if(m.type==='state'){state=m;render();} if(m.type==='models'){models=m.models||[];renderModels();} if(m.type==='attachedImages'){pendingImages=[...pendingImages,...(m.images||[])];renderAttachments();}});
-function render(){renderTasks();renderMessages();renderStatus();}
+function render(){renderTasks();renderMessages();renderStatus();renderMeta();}
 function active(){return state.tasks.find(t=>t.id===state.activeTaskId)}
 function renderTasks(){el('tasks').innerHTML=state.tasks.map(t=>{const last=[...(t.messages||[])].reverse().find(m=>m.role==='error');const status=last?'error':(t.streaming?'running':'idle');return '<div class="task '+(t.id===state.activeTaskId?'active':'')+'" data-id="'+t.id+'">'+esc(t.name)+'<small><span class="dot '+status+'"></span>'+status+(t.model?' · '+esc(t.model):'')+'</small></div>'}).join('');document.querySelectorAll('.task').forEach(n=>n.onclick=()=>vscode.postMessage({type:'switchTask',taskId:n.dataset.id}));}
 function renderMessages(){const t=active();el('messages').innerHTML=!t?'':t.messages.map(m=>'<div class="msg '+m.role+'"><div class="role">'+esc(m.role)+(m.toolName?' · '+esc(m.toolName):'')+(m.status?' · '+esc(m.status):'')+'</div>'+esc(m.text)+'</div>').join('');el('messages').scrollTop=el('messages').scrollHeight;}
 function renderStatus(){const t=active();el('status').textContent=t?(t.streaming?'Running':'Idle'):'';}
+function renderMeta(){const t=active();el('meta').textContent=t?((t.sessionFile||'session pending')+(t.sessionId?' · '+t.sessionId:'')):'';}
 function renderModels(){el('models').innerHTML='<option value="">Model</option>'+models.map(m=>'<option value="'+escAttr((m.provider?m.provider+'/':'')+m.id)+'">'+esc((m.name||m.id)+' · '+(m.provider||''))+'</option>').join('');}
 function renderAttachments(){el('attachments').textContent=pendingImages.length?('Attached: '+pendingImages.map(i=>i.fileName||i.mimeType).join(', ')):'';}
 function send(){const text=el('input').value.trim();if(!text)return;vscode.postMessage({type:'send',text,images:pendingImages.map(i=>({type:'image',data:i.data,mimeType:i.mimeType}))});el('input').value='';pendingImages=[];renderAttachments();}
-el('send').onclick=send;el('newTask').onclick=()=>vscode.postMessage({type:'newTask'});el('stop').onclick=()=>vscode.postMessage({type:'stop'});el('restart').onclick=()=>vscode.postMessage({type:'restart'});el('rename').onclick=()=>vscode.postMessage({type:'renameTask'});el('attach').onclick=()=>vscode.postMessage({type:'attachImage'});el('models').onchange=e=>vscode.postMessage({type:'setModel',modelId:e.target.value});el('input').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();});
+el('send').onclick=send;el('newTask').onclick=()=>vscode.postMessage({type:'newTask'});el('stop').onclick=()=>vscode.postMessage({type:'stop'});el('restart').onclick=()=>vscode.postMessage({type:'restart'});el('rename').onclick=()=>vscode.postMessage({type:'renameTask'});el('copySession').onclick=()=>vscode.postMessage({type:'copySessionPath'});el('exportHtml').onclick=()=>vscode.postMessage({type:'exportHtml'});el('attach').onclick=()=>vscode.postMessage({type:'attachImage'});el('models').onchange=e=>vscode.postMessage({type:'setModel',modelId:e.target.value});el('input').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();});
 function esc(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}function escAttr(s){return esc(s).replace(/"/g,'&quot;');}
 </script></body></html>`;
   }
