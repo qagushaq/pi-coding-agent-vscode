@@ -23,6 +23,7 @@ VS Code extension wrapper for [Pi Coding Agent](https://github.com/earendil-work
 - Show Pi session file/id
 - Copy session path
 - Export current session to HTML
+- Restore tasks/messages after closing and reopening the panel/window
 
 ## Development
 

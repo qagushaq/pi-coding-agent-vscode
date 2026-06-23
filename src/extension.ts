@@ -28,6 +28,18 @@ type UiMessage = {
   status?: string;
 };
 
+type PersistedTask = {
+  name: string;
+  cwd: string;
+  model?: string;
+  sessionFile?: string;
+  sessionId?: string;
+  messages: UiMessage[];
+};
+
+const TASKS_STATE_KEY = 'piCode.tasks';
+const ACTIVE_TASK_STATE_KEY = 'piCode.activeTaskId';
+
 class PiRpcTask {
   readonly task: Task;
   private onEvent: (task: Task, event: RpcEvent) => void;
@@ -98,6 +110,9 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     view.webview.onDidReceiveMessage(async msg => {
       switch (msg.type) {
         case 'ready':
+          if (this.tasks.size === 0) {
+            await this.restoreTasks();
+          }
           this.postState();
           if (!this.activeTaskId) await this.newTask();
           break;
@@ -136,26 +151,29 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  async newTask(name?: string) {
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+  async newTask(name?: string, restored?: Partial<PersistedTask>) {
+    const folder = restored?.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     const config = vscode.workspace.getConfiguration('piCode');
     const piCommand = config.get<string>('piCommand') || 'pi';
-    const defaultModel = config.get<string>('defaultModel') || '';
+    const defaultModel = restored?.model || config.get<string>('defaultModel') || '';
     const extraArgs = config.get<string[]>('extraArgs') || [];
     const args = ['--mode', 'rpc', ...extraArgs];
     if (defaultModel) args.push('--model', defaultModel);
 
     const proc = spawn(piCommand, args, { cwd: folder, env: process.env });
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const restoredMessages = restored?.messages?.length ? restored.messages : undefined;
     const task: Task = {
       id,
-      name: name || `Task ${this.tasks.size + 1}`,
+      name: name || restored?.name || `Task ${this.tasks.size + 1}`,
       cwd: folder,
       proc,
       buffer: '',
       streaming: false,
       model: defaultModel || undefined,
-      messages: [{ id: `sys-${id}`, role: 'system', text: `Started Pi RPC in ${folder}` }],
+      sessionFile: restored?.sessionFile,
+      sessionId: restored?.sessionId,
+      messages: restoredMessages || [{ id: `sys-${id}`, role: 'system', text: `Started Pi RPC in ${folder}` }],
     };
     proc.on('error', error => {
       task.streaming = false;
@@ -171,8 +189,38 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     this.tasks.set(id, rpc);
     this.activeTaskId = id;
     rpc.send({ type: 'get_available_models' });
+    if (restored?.sessionFile) {
+      rpc.send({ type: 'switch_session', sessionPath: restored.sessionFile });
+    }
     rpc.send({ type: 'get_state' });
     this.postState();
+  }
+
+  private async restoreTasks() {
+    const saved = this.context.workspaceState.get<PersistedTask[]>(TASKS_STATE_KEY, []);
+    if (!saved.length) return;
+
+    const activeIndex = this.context.workspaceState.get<number>(ACTIVE_TASK_STATE_KEY, 0);
+    for (const item of saved.slice(0, 8)) {
+      await this.newTask(item.name, item);
+    }
+    const ids = [...this.tasks.keys()];
+    this.activeTaskId = ids[Math.min(activeIndex, ids.length - 1)] || ids[0];
+    this.postState();
+  }
+
+  private persistTasks() {
+    const tasks = [...this.tasks.values()].map(r => ({
+      name: r.task.name,
+      cwd: r.task.cwd,
+      model: r.task.model,
+      sessionFile: r.task.sessionFile,
+      sessionId: r.task.sessionId,
+      messages: r.task.messages.slice(-200),
+    }));
+    const activeIndex = [...this.tasks.keys()].findIndex(id => id === this.activeTaskId);
+    void this.context.workspaceState.update(TASKS_STATE_KEY, tasks);
+    void this.context.workspaceState.update(ACTIVE_TASK_STATE_KEY, Math.max(activeIndex, 0));
   }
 
   stopActive() {
@@ -359,6 +407,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
       sessionId: r.task.sessionId,
       messages: r.task.messages,
     }));
+    this.persistTasks();
     this.view?.webview.postMessage({ type: 'state', activeTaskId: this.activeTaskId, tasks });
   }
 
@@ -367,39 +416,37 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <style>
-  :root{--bg:var(--vscode-editor-background);--fg:var(--vscode-editor-foreground);--muted:var(--vscode-descriptionForeground);--border:var(--vscode-panel-border);--accent:var(--vscode-button-background);--accentFg:var(--vscode-button-foreground);--input:var(--vscode-input-background)}
-  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--vscode-font-family);font-size:13px;height:100vh;display:flex;overflow:hidden}
-  .tasks{width:190px;border-right:1px solid var(--border);display:flex;flex-direction:column;min-width:150px}
-  .task{padding:8px;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .task.active{background:var(--vscode-list-activeSelectionBackground);color:var(--vscode-list-activeSelectionForeground)}
-  .task small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis}
-  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;background:var(--muted)}.dot.running{background:#75E6A7}.dot.error{background:var(--vscode-errorForeground)}
+  :root{--bg:var(--vscode-editor-background);--fg:var(--vscode-editor-foreground);--muted:var(--vscode-descriptionForeground);--border:color-mix(in srgb,var(--vscode-panel-border) 75%,transparent);--accent:var(--vscode-button-background);--accentFg:var(--vscode-button-foreground);--input:var(--vscode-input-background);--card:color-mix(in srgb,var(--vscode-editorWidget-background) 88%,transparent);--soft:color-mix(in srgb,var(--vscode-button-background) 10%,transparent);--shadow:rgba(0,0,0,.18)}
+  *{box-sizing:border-box} body{margin:0;background:linear-gradient(135deg,color-mix(in srgb,var(--bg) 94%,var(--accent)),var(--bg));color:var(--fg);font-family:var(--vscode-font-family);font-size:13px;height:100vh;display:flex;overflow:hidden}
+  .tasks{width:230px;border-right:1px solid var(--border);display:flex;flex-direction:column;min-width:180px;background:color-mix(in srgb,var(--bg) 92%,black)}
+  .task{margin:6px 8px 0;padding:10px 11px;border:1px solid transparent;border-radius:10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .12s,border-color .12s,transform .12s}
+  .task:hover{background:var(--soft);border-color:var(--border)} .task.active{background:color-mix(in srgb,var(--accent) 20%,transparent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);box-shadow:0 8px 24px var(--shadow)}
+  .task small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis;margin-top:4px}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--muted) 16%,transparent)}.dot.running{background:#75E6A7;box-shadow:0 0 0 3px rgba(117,230,167,.18)}.dot.error{background:var(--vscode-errorForeground);box-shadow:0 0 0 3px color-mix(in srgb,var(--vscode-errorForeground) 20%,transparent)}
   .main{flex:1;display:flex;flex-direction:column;min-width:0}
-  .toolbar{display:flex;gap:6px;padding:8px;border-bottom:1px solid var(--border);align-items:center}
-  button{background:var(--accent);color:var(--accentFg);border:0;padding:5px 9px;border-radius:3px;cursor:pointer}
-  button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground)}
-  select{background:var(--input);color:var(--fg);border:1px solid var(--border);padding:4px;max-width:260px}
-  .messages{flex:1;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
-  .msg{border:1px solid var(--border);border-radius:6px;padding:9px;white-space:pre-wrap;line-height:1.4}
-  .user{background:color-mix(in srgb,var(--accent) 12%,transparent)}
-  .assistant{background:var(--vscode-editorWidget-background)}
-  .tool{font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--muted)}
-  .error{border-color:var(--vscode-errorForeground);color:var(--vscode-errorForeground)}
-  .system{color:var(--muted)}
-  .role{font-size:11px;text-transform:uppercase;color:var(--muted);margin-bottom:5px}
-  .composer{border-top:1px solid var(--border);padding:8px;display:flex;flex-direction:column;gap:6px}
-  textarea{height:78px;resize:vertical;background:var(--input);color:var(--fg);border:1px solid var(--border);padding:8px;font-family:var(--vscode-font-family)}
-  .row{display:flex;gap:6px;align-items:center}.grow{flex:1}.attachments{font-size:12px;color:var(--muted)}
-  .meta{padding:6px 8px;border-bottom:1px solid var(--border);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .thumbs{display:flex;gap:8px;flex-wrap:wrap}.thumb{position:relative;border:1px solid var(--border);border-radius:5px;padding:4px;background:var(--vscode-editorWidget-background)}.thumb img{display:block;max-width:90px;max-height:70px}.thumb button{position:absolute;top:-7px;right:-7px;border-radius:50%;width:20px;height:20px;padding:0;background:var(--vscode-errorForeground);color:white}.drop-hint{border:1px dashed var(--border);padding:6px;border-radius:5px;text-align:center;color:var(--muted)}
+  .toolbar{display:flex;gap:8px;padding:10px;border-bottom:1px solid var(--border);align-items:center;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px)}
+  button{background:var(--accent);color:var(--accentFg);border:0;padding:7px 11px;border-radius:8px;cursor:pointer;font-weight:600;box-shadow:0 4px 14px var(--shadow)} button:hover{filter:brightness(1.08)}
+  button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);box-shadow:none;border:1px solid var(--border)}
+  select{background:var(--input);color:var(--fg);border:1px solid var(--border);padding:7px 9px;border-radius:8px;max-width:320px;outline:none}
+  .messages{flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth}
+  .msg{border:1px solid var(--border);border-radius:14px;padding:12px 14px;white-space:pre-wrap;line-height:1.5;background:var(--card);box-shadow:0 8px 28px var(--shadow)}
+  .user{align-self:flex-end;max-width:86%;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 28%,transparent),color-mix(in srgb,var(--accent) 12%,transparent));border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
+  .assistant{align-self:flex-start;max-width:92%}.tool{font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--muted);background:color-mix(in srgb,var(--bg) 78%,black)}
+  .error{border-color:var(--vscode-errorForeground);color:var(--vscode-errorForeground);background:color-mix(in srgb,var(--vscode-errorForeground) 10%,var(--card))}.system{color:var(--muted);box-shadow:none;background:transparent;border-style:dashed}
+  .role{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px;font-weight:700}
+  .composer{border-top:1px solid var(--border);padding:12px;display:flex;flex-direction:column;gap:9px;background:color-mix(in srgb,var(--bg) 90%,transparent)}
+  textarea{height:92px;resize:vertical;background:var(--input);color:var(--fg);border:1px solid var(--border);border-radius:12px;padding:12px;font-family:var(--vscode-font-family);outline:none;box-shadow:inset 0 0 0 1px transparent} textarea:focus{border-color:color-mix(in srgb,var(--accent) 60%,var(--border));box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent)}
+  .row{display:flex;gap:8px;align-items:center}.grow{flex:1}.attachments{font-size:12px;color:var(--muted)}
+  .meta{padding:7px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:color-mix(in srgb,var(--bg) 94%,transparent)}
+  .thumbs{display:flex;gap:10px;flex-wrap:wrap}.thumb{position:relative;border:1px solid var(--border);border-radius:10px;padding:6px;background:var(--card);box-shadow:0 4px 16px var(--shadow)}.thumb img{display:block;max-width:110px;max-height:82px;border-radius:7px}.thumb button{position:absolute;top:-8px;right:-8px;border-radius:50%;width:22px;height:22px;padding:0;background:var(--vscode-errorForeground);color:white;box-shadow:0 4px 14px var(--shadow)}.drop-hint{border:1px dashed color-mix(in srgb,var(--accent) 40%,var(--border));padding:10px;border-radius:10px;text-align:center;color:var(--muted);background:var(--soft)}
 </style></head>
 <body>
-  <div class="tasks"><div class="toolbar"><button id="newTask">New</button><button class="secondary" id="rename">Rename</button><button class="secondary" id="restart">Restart</button></div><div id="tasks"></div></div>
+  <div class="tasks"><div class="toolbar"><button id="newTask">＋ New</button><button class="secondary" id="rename">Rename</button><button class="secondary" id="restart">↻</button></div><div id="tasks"></div></div>
   <div class="main">
     <div class="toolbar"><select id="models"><option value="">Model</option></select><button class="secondary" id="stop">Stop</button><button class="secondary" id="copySession">Copy session</button><button class="secondary" id="exportHtml">Export HTML</button><span class="grow"></span><span id="status"></span></div>
     <div class="meta" id="meta"></div>
     <div class="messages" id="messages"></div>
-    <div class="composer"><div class="attachments" id="attachments"></div><textarea id="input" placeholder="Ask Pi..."></textarea><div class="row"><button id="send">Send</button><button class="secondary" id="attach">Attach image</button><span class="grow"></span><span class="attachments">Ctrl/Cmd+Enter to send</span></div></div>
+    <div class="composer"><div class="attachments" id="attachments"></div><textarea id="input" placeholder="Ask Pi anything..."></textarea><div class="row"><button id="send">Send</button><button class="secondary" id="attach">Attach image</button><span class="grow"></span><span class="attachments">Ctrl/Cmd+Enter to send</span></div></div>
   </div>
 <script nonce="${nonce}">
 const vscode=acquireVsCodeApi();let state={tasks:[],activeTaskId:null};let models=[];let pendingImages=[];
