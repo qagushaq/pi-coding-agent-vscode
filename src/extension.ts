@@ -146,6 +146,16 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
       model: defaultModel || undefined,
       messages: [{ id: `sys-${id}`, role: 'system', text: `Started Pi RPC in ${folder}` }],
     };
+    proc.on('error', error => {
+      task.streaming = false;
+      task.messages.push({
+        id: `err-${Date.now()}`,
+        role: 'error',
+        text: `Failed to start Pi: ${error.message}. Check the piCode.piCommand setting.`,
+      });
+      this.postState();
+    });
+
     const rpc = new PiRpcTask(task, (t, e) => this.handleEvent(t, e), (t, code) => this.handleExit(t, code));
     this.tasks.set(id, rpc);
     this.activeTaskId = id;
@@ -175,10 +185,16 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     const task = this.activeTask();
     const rpc = this.activeRpc();
     if (!task || !rpc || !text.trim()) return;
+    const wasStreaming = task.streaming;
     task.messages.push({ id: `u-${Date.now()}`, role: 'user', text });
     task.messages.push({ id: `a-${Date.now()}`, role: 'assistant', text: '', status: 'streaming' });
     task.streaming = true;
-    rpc.send({ type: 'prompt', message: text, images, streamingBehavior: task.streaming ? 'followUp' : undefined });
+    rpc.send({
+      type: 'prompt',
+      message: text,
+      images,
+      ...(wasStreaming ? { streamingBehavior: 'followUp' } : {}),
+    });
     this.postState();
   }
 

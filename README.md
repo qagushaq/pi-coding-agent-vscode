@@ -14,6 +14,7 @@ VS Code extension wrapper for [Pi Coding Agent](https://github.com/earendil-work
 - Stop/restart task
 - Model selector
 - Attach image from file
+- Basic startup error reporting when `pi` is not found
 
 ## Development
 
