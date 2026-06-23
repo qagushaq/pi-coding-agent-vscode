@@ -39,9 +39,31 @@ npx @vscode/vsce package --no-dependencies
 ## Использование
 
 1. Установите VSIX-файл расширения.
-2. Откройте пункт Pi Code в activity bar.
-3. Отправьте сообщение.
-4. Настройте команду/модель через настройки VS Code:
+2. Перезагрузите окно VS Code.
+3. Откройте пункт Pi Code в activity bar.
+4. Отправьте сообщение.
+5. Настройте команду/модель через настройки VS Code:
    - `piCode.piCommand`
    - `piCode.defaultModel`
    - `piCode.extraArgs`
+
+## Локальная установка
+
+```bash
+npm run package
+code --install-extension pi-coding-agent-vscode-0.1.0.vsix --force
+```
+
+После этого выполните `Developer: Reload Window` в VS Code.
+
+## Чеклист проверки
+
+- Иконка Pi Code появилась в Activity Bar.
+- Новая задача стартует без ошибок команды `pi`.
+- Prompt отправляется, ответ ассистента стримится.
+- Tool executions отображаются отдельными блоками.
+- Кнопки New/Rename/Restart/Stop работают.
+- Model selector заполняется.
+- Attach/paste/drop image показывает preview и отправляет картинку с prompt.
+- Copy session копирует путь текущей Pi session.
+- Export HTML пишет путь HTML-транскрипта в чат.
