@@ -1,0 +1,93 @@
+{
+  "name": "pi-coding-agent-vscode",
+  "displayName": "Pi Code",
+  "description": "VS Code UI wrapper for Pi coding agent RPC",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:piCode.chatView",
+    "onCommand:piCode.newTask",
+    "onCommand:piCode.stopTask",
+    "onCommand:piCode.restartTask"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "piCode",
+          "title": "Pi Code",
+          "icon": "resources/pi-code.svg"
+        }
+      ]
+    },
+    "views": {
+      "piCode": [
+        {
+          "id": "piCode.chatView",
+          "name": "Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "piCode.newTask",
+        "title": "Pi Code: New Task"
+      },
+      {
+        "command": "piCode.stopTask",
+        "title": "Pi Code: Stop Current Task"
+      },
+      {
+        "command": "piCode.restartTask",
+        "title": "Pi Code: Restart Current Task"
+      }
+    ],
+    "configuration": {
+      "title": "Pi Code",
+      "properties": {
+        "piCode.piCommand": {
+          "type": "string",
+          "default": "pi",
+          "description": "Pi executable command/path"
+        },
+        "piCode.defaultModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model pattern passed to pi --model on new tasks"
+        },
+        "piCode.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra CLI arguments for pi RPC"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "npm run compile && npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/qagushaq/pi-coding-agent-vscode.git"
+  },
+  "license": "MIT"
+}
