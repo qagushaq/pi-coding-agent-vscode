@@ -2,7 +2,7 @@
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
   "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -28,6 +28,11 @@
           "id": "piCode.chatView",
           "name": "Chat",
           "type": "webview"
+        },
+        {
+          "id": "piCode.sessionsView",
+          "name": "Sessions",
+          "icon": "$(history)"
         }
       ]
     },
@@ -79,6 +84,78 @@
         "command": "piCode.focus",
         "title": "Focus Chat",
         "category": "Pi Code"
+      },
+      {
+        "command": "piCode.openSession",
+        "title": "Open Session",
+        "category": "Pi Code",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "piCode.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "Pi Code",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "piCode.searchSessions",
+        "title": "Search Sessions",
+        "category": "Pi Code",
+        "icon": "$(search)"
+      },
+      {
+        "command": "piCode.toggleSessionScope",
+        "title": "Toggle Workspace / All Sessions",
+        "category": "Pi Code",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "piCode.toggleArchived",
+        "title": "Show / Hide Archived",
+        "category": "Pi Code",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "piCode.renameSession",
+        "title": "Rename Session",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.archiveSession",
+        "title": "Archive Session",
+        "category": "Pi Code",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "piCode.unarchiveSession",
+        "title": "Unarchive Session",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.deleteSession",
+        "title": "Delete Session",
+        "category": "Pi Code",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "piCode.revealSession",
+        "title": "Reveal Session File",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.copySessionId",
+        "title": "Copy Session Id",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.cycleEffort",
+        "title": "Cycle Reasoning Effort",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.pickModel",
+        "title": "Pick Model and Effort",
+        "category": "Pi Code"
       }
     ],
     "menus": {
@@ -89,14 +166,34 @@
           "group": "navigation@1"
         },
         {
-          "command": "piCode.resumeSession",
+          "command": "piCode.stopTask",
           "when": "view == piCode.chatView",
           "group": "navigation@2"
         },
         {
-          "command": "piCode.stopTask",
-          "when": "view == piCode.chatView",
+          "command": "piCode.newSession",
+          "when": "view == piCode.sessionsView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "piCode.searchSessions",
+          "when": "view == piCode.sessionsView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "piCode.toggleSessionScope",
+          "when": "view == piCode.sessionsView",
           "group": "navigation@3"
+        },
+        {
+          "command": "piCode.toggleArchived",
+          "when": "view == piCode.sessionsView",
+          "group": "navigation@4"
+        },
+        {
+          "command": "piCode.refreshSessions",
+          "when": "view == piCode.sessionsView",
+          "group": "navigation@5"
         }
       ],
       "editor/context": [
@@ -109,6 +206,48 @@
         {
           "command": "piCode.addFile",
           "group": "piCode@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "piCode.openSession",
+          "when": "view == piCode.sessionsView && viewItem =~ /^piSession/",
+          "group": "inline@1"
+        },
+        {
+          "command": "piCode.archiveSession",
+          "when": "view == piCode.sessionsView && viewItem == piSession",
+          "group": "inline@2"
+        },
+        {
+          "command": "piCode.renameSession",
+          "when": "view == piCode.sessionsView && viewItem =~ /^piSession/",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "piCode.archiveSession",
+          "when": "view == piCode.sessionsView && viewItem == piSession",
+          "group": "1_edit@2"
+        },
+        {
+          "command": "piCode.unarchiveSession",
+          "when": "view == piCode.sessionsView && viewItem == piSessionArchived",
+          "group": "1_edit@2"
+        },
+        {
+          "command": "piCode.copySessionId",
+          "when": "view == piCode.sessionsView && viewItem =~ /^piSession/",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "piCode.revealSession",
+          "when": "view == piCode.sessionsView && viewItem =~ /^piSession/",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "piCode.deleteSession",
+          "when": "view == piCode.sessionsView && viewItem =~ /^piSession/",
+          "group": "3_danger@1"
         }
       ]
     },
@@ -123,6 +262,11 @@
         "command": "piCode.focus",
         "key": "ctrl+alt+p",
         "mac": "cmd+alt+p"
+      },
+      {
+        "command": "piCode.cycleEffort",
+        "key": "ctrl+alt+e",
+        "mac": "cmd+alt+e"
       }
     ],
     "configuration": {
@@ -180,6 +324,24 @@
           "type": "boolean",
           "default": true,
           "description": "Show collapsible thinking blocks for models that stream reasoning."
+        },
+        "piCode.defaultEffort": {
+          "type": "string",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": "",
+          "description": "Reasoning effort for new tasks on gateways that encode effort in the model id (e.g. gpt-6-astra-xhigh). Empty keeps whatever the default model already says."
+        },
+        "piCode.preferFastVariants": {
+          "type": "boolean",
+          "default": false,
+          "description": "Prefer the -fast variant of a model when switching family or effort."
         }
       }
     }
@@ -189,7 +351,8 @@
     "watch": "tsc -watch -p ./",
     "smoke": "npm run compile && node scripts/smoke.js",
     "package": "npm run compile && npx @vscode/vsce package --no-dependencies",
-    "install-local": "npm run package && code --install-extension pi-coding-agent-vscode-0.2.0.vsix --force"
+    "install-local": "npm run package && code --install-extension pi-coding-agent-vscode-0.3.0.vsix --force",
+    "check": "npm run compile && node scripts/tiers-check.js && node scripts/webview-check.js"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",

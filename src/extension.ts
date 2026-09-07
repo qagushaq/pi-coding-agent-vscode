@@ -3,7 +3,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { PiProcess, RpcEvent, RpcResponse, augmentedEnv, resolvePiCommand } from './pi-process';
 import { Conversation, UiImage, UiMessage, nextId } from './conversation';
-import { listSessions, SessionInfo } from './sessions';
+import { deleteSession, listSessions, SessionInfo, sessionTitle } from './sessions';
+import { SessionNode, SessionTreeProvider } from './session-tree';
+import { Effort, Family, buildFamilies, composeModelId, familyLabel, parseModelId } from './model-tiers';
 import { renderWebviewHtml } from './webview';
 
 type ContextChip = { kind: 'selection' | 'file'; path: string; label: string; startLine?: number; endLine?: number; text: string; language?: string };
@@ -24,6 +26,8 @@ type Task = {
   lastError?: string;
   alive: boolean;
   models: any[];
+  families: Family[];
+  tier: { family?: string; effort?: Effort; fast: boolean };
   levels: string[];
   commands: any[];
   currentBashId?: string;
@@ -43,6 +47,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private status: vscode.StatusBarItem;
   private renderTimer?: NodeJS.Timeout;
   private output: vscode.OutputChannel;
+  tree?: SessionTreeProvider;
 
   constructor(private context: vscode.ExtensionContext) {
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -119,6 +124,9 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       case 'setModel':
         await this.setModel(String(msg.modelId || ''));
         break;
+      case 'setTier':
+        await this.setTier(msg);
+        break;
       case 'setThinking':
         await this.setThinking(String(msg.level || ''));
         break;
@@ -172,6 +180,8 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       widgets: {},
       alive: false,
       models: [],
+      families: [],
+      tier: { fast: false },
       levels: [],
       commands: [],
     };
@@ -241,7 +251,9 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
         const r = await proc.request({ type: 'set_thinking_level', level });
         if (r.success) task.thinking = level;
       }
-      this.loadTaskInfo(task).catch(err => this.report(err));
+      await this.loadTaskInfo(task);
+      const effort = cfg.get<string>('defaultEffort') as Effort | '' | undefined;
+      if (opts.fresh && effort) await this.setTier({ effort, fast: cfg.get<boolean>('preferFastVariants', false) });
     } catch (err: any) {
       task.conv.system(`pi did not answer: ${err.message}`, 'error');
     }
@@ -257,7 +269,10 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     task.sessionId = d.sessionId || task.sessionId;
     task.sessionName = d.sessionName || undefined;
     task.thinking = d.thinkingLevel;
-    if (d.model?.id) task.model = `${d.model.provider ? d.model.provider + '/' : ''}${d.model.id}`;
+    if (d.model?.id) {
+      task.model = `${d.model.provider ? d.model.provider + '/' : ''}${d.model.id}`;
+      this.syncTier(task);
+    }
     if (task.sessionName && task.name.startsWith('Task ')) task.name = task.sessionName;
     const lv = await task.proc.request({ type: 'get_available_thinking_levels' });
     if (lv.success) task.levels = lv.data?.levels || [];
@@ -266,15 +281,30 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private async loadTaskInfo(task: Task): Promise<void> {
     if (!task.proc?.alive) return;
     const [models, commands] = await Promise.all([task.proc.request({ type: 'get_available_models' }), task.proc.request({ type: 'get_commands' })]);
-    if (models.success) task.models = models.data?.models || [];
+    if (models.success) {
+      task.models = models.data?.models || [];
+      task.families = buildFamilies(task.models.map((m: any) => ({ id: m.id, provider: m.provider })));
+    }
     if (commands.success) task.commands = commands.data?.commands || [];
     this.postTaskInfo(task);
   }
 
   private postTaskInfo(task: Task): void {
-    this.view?.webview.postMessage({ type: 'models', taskId: task.id, models: task.models.map(m => ({ id: m.id, name: m.name, provider: m.provider, reasoning: m.reasoning, input: m.input })) });
-    this.view?.webview.postMessage({ type: 'thinkingLevels', taskId: task.id, levels: task.levels });
+    this.view?.webview.postMessage({
+      type: 'modelOptions',
+      taskId: task.id,
+      families: task.families.map(f => ({ family: f.family, label: familyLabel(f.family), efforts: f.efforts, hasFast: f.hasFast, hasBase: f.hasBase })),
+      levels: task.levels,
+    });
     this.view?.webview.postMessage({ type: 'commands', taskId: task.id, commands: task.commands.map(c => ({ name: c.name, description: c.description, source: c.source })) });
+  }
+
+  /** Keep `tier` in sync with whatever model id the session actually runs. */
+  private syncTier(task: Task): void {
+    const id = (task.model || '').replace(/^.*?\//, '');
+    if (!id) return;
+    const p = parseModelId(id);
+    task.tier = { family: p.family, effort: p.effort, fast: p.fast };
   }
 
   closeTask(taskId: string): void {
@@ -526,12 +556,93 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     const r = await task.proc.request(cmd);
     if (r.success) {
       task.model = r.data?.id ? `${r.data.provider ? r.data.provider + '/' : ''}${r.data.id}` : modelId;
+      this.syncTier(task);
       await this.refreshState(task);
       this.postTaskInfo(task);
     } else {
       task.conv.system(r.error || 'Could not switch model', 'error');
     }
     this.postState();
+  }
+
+  /**
+   * Switch model family / effort / speed on gateways that encode effort in the model id.
+   * Falls back to the nearest available effort when the target family has a shorter ladder.
+   */
+  async setTier(change: { family?: string; effort?: Effort; fast?: boolean }): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    const family = task.families.find(f => f.family === (change.family ?? task.tier.family));
+    if (!family) {
+      vscode.window.showWarningMessage('This provider does not expose model families with effort levels.');
+      return;
+    }
+    const effort = change.effort ?? task.tier.effort;
+    const fast = change.fast ?? task.tier.fast;
+    const id = composeModelId(family, effort, fast);
+    if (!id) {
+      vscode.window.showWarningMessage(`No model id for ${family.family} at effort ${effort ?? 'default'}.`);
+      return;
+    }
+    if (id === (task.model || '').replace(/^.*?\//, '')) {
+      task.tier = { family: family.family, effort, fast };
+      this.postState();
+      return;
+    }
+    await this.setModel(`${task.models.find(m => m.id === id)?.provider || 'litellm'}/${id}`);
+    const applied = parseModelId((task.model || '').replace(/^.*?\//, ''));
+    if (applied.effort !== effort && effort) {
+      task.conv.system(`${familyLabel(family.family)} has no "${effort}" level, using "${applied.effort ?? 'default'}".`, 'warning');
+      this.postState();
+    }
+  }
+
+  /** Step the effort one notch up, wrapping at the top of the ladder. */
+  async cycleEffort(): Promise<void> {
+    const task = this.activeTask();
+    if (!task) return;
+    const family = task.families.find(f => f.family === task.tier.family);
+    if (!family?.efforts.length) {
+      vscode.window.showInformationMessage('Current model has no effort levels to cycle.');
+      return;
+    }
+    const idx = task.tier.effort ? family.efforts.indexOf(task.tier.effort) : -1;
+    await this.setTier({ effort: family.efforts[(idx + 1) % family.efforts.length] });
+  }
+
+  /** Quick pick over family, then effort, then speed. */
+  async pickModel(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.families.length) {
+      vscode.window.showInformationMessage('Model list is not loaded yet.');
+      return;
+    }
+    const fam = await vscode.window.showQuickPick(
+      task.families.map(f => ({
+        label: familyLabel(f.family),
+        description: f.efforts.length ? f.efforts.join(' / ') : 'no effort levels',
+        detail: f.family === task.tier.family ? 'current' : undefined,
+        family: f,
+      })),
+      { title: 'Model family' },
+    );
+    if (!fam) return;
+    let effort: Effort | undefined;
+    if (fam.family.efforts.length) {
+      const pick = await vscode.window.showQuickPick(
+        fam.family.efforts.map(e => ({ label: e, description: e === task.tier.effort ? 'current' : undefined })),
+        { title: `Reasoning effort for ${fam.label}` },
+      );
+      if (!pick) return;
+      effort = pick.label as Effort;
+    }
+    let fast = task.tier.fast;
+    if (fam.family.hasFast) {
+      const pick = await vscode.window.showQuickPick(['standard', 'fast'], { title: 'Speed variant' });
+      if (!pick) return;
+      fast = pick === 'fast';
+    }
+    await this.setTier({ family: fam.family.family, effort, fast });
   }
 
   async setThinking(level: string): Promise<void> {
@@ -603,6 +714,43 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       task.conv.system(r.error || 'Export failed', 'error');
       this.postState();
     }
+  }
+
+  /** Open a session from the tree: focus its task when already open, otherwise start a task on it. */
+  async openSessionFile(file: string, name?: string): Promise<void> {
+    const existing = [...this.tasks.values()].find(t => t.sessionFile === file);
+    if (existing) {
+      this.activeTaskId = existing.id;
+      await this.focus();
+      this.postState();
+      this.postTaskInfo(existing);
+      return;
+    }
+    const info = listSessions(undefined, { limit: 5000 }).find(s => s.file === file);
+    await this.focus();
+    await this.newTask({ name: name || (info ? sessionTitle(info) : undefined), cwd: info?.cwd || this.workspaceCwd(), sessionFile: file });
+  }
+
+  /** A session file that vanished must not stay attached to a task. */
+  detachSession(file: string): void {
+    for (const t of this.tasks.values()) {
+      if (t.sessionFile !== file) continue;
+      t.proc?.kill();
+      this.tasks.delete(t.id);
+      if (this.activeTaskId === t.id) this.activeTaskId = [...this.tasks.keys()].pop();
+    }
+    this.postState();
+  }
+
+  /** Rename an open session through pi so the name lands in the session file too. */
+  async renameOpenSession(file: string, name: string): Promise<boolean> {
+    const task = [...this.tasks.values()].find(t => t.sessionFile === file);
+    if (!task?.proc?.alive) return false;
+    task.name = name;
+    task.sessionName = name;
+    task.proc.send({ type: 'set_session_name', name });
+    this.postState();
+    return true;
   }
 
   async resumeSession(): Promise<void> {
@@ -761,6 +909,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       alive: t.alive,
       streaming: t.conv.streaming,
       model: t.model,
+      tier: t.tier,
       thinking: t.thinking,
       sessionFile: t.sessionFile,
       sessionId: t.sessionId,
@@ -773,6 +922,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       queue: t.conv.queue,
     }));
     this.persistTasks();
+    this.tree?.setOpen([...this.tasks.values()].filter(t => t.sessionFile).map(t => ({ file: t.sessionFile!, taskId: t.id, streaming: t.conv.streaming })));
     const active = this.activeTask();
     if (active?.conv.streaming) {
       this.status.text = `$(sync~spin) pi: ${active.name}`;
@@ -805,8 +955,30 @@ function fmtDate(d: Date): string {
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiCodeProvider(context);
+  const cwd = () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+  const tree = new SessionTreeProvider(context, cwd);
+  provider.tree = tree;
+  const view = vscode.window.createTreeView('piCode.sessionsView', { treeDataProvider: tree, showCollapseAll: true });
+
+  const refresh = () => {
+    tree.refresh();
+    view.description = [tree.scopeIsAll ? 'all workspaces' : path.basename(cwd()), tree.filterText ? `search: ${tree.filterText}` : ''].filter(Boolean).join(' · ');
+  };
+  refresh();
+  void tree.prune();
+
+  // pi appends to the session file on every turn, so watching the tree keeps ages and titles fresh.
+  const watcher = fs.watch(require('./sessions').sessionsRoot(), { recursive: true }, () => {
+    clearTimeout((watcher as any)._t);
+    (watcher as any)._t = setTimeout(refresh, 1200);
+  });
+
+  const sessionOf = (node?: SessionNode): SessionInfo | undefined => (node && node.kind === 'session' ? node.session : undefined);
+
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('piCode.chatView', provider, { webviewOptions: { retainContextWhenHidden: true } }),
+    view,
+    { dispose: () => watcher.close() },
     vscode.commands.registerCommand('piCode.newTask', () => provider.newTask()),
     vscode.commands.registerCommand('piCode.stopTask', () => provider.stopActive()),
     vscode.commands.registerCommand('piCode.restartTask', () => provider.restartActive()),
@@ -816,6 +988,72 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.newSession', () => provider.newSessionInActive()),
     vscode.commands.registerCommand('piCode.compact', () => provider.compactActive()),
     vscode.commands.registerCommand('piCode.focus', () => provider.focus()),
+    vscode.commands.registerCommand('piCode.cycleEffort', () => provider.cycleEffort()),
+    vscode.commands.registerCommand('piCode.pickModel', () => provider.pickModel()),
+
+    vscode.commands.registerCommand('piCode.openSession', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (s) await provider.openSessionFile(s.file, tree.displayName(s));
+    }),
+    vscode.commands.registerCommand('piCode.refreshSessions', refresh),
+    vscode.commands.registerCommand('piCode.searchSessions', async () => {
+      const text = await vscode.window.showInputBox({ title: 'Search pi sessions', value: tree.filterText, prompt: 'Matches name, prompts, model and folder. Empty clears.' });
+      if (text === undefined) return;
+      tree.setFilter(text);
+      refresh();
+    }),
+    vscode.commands.registerCommand('piCode.toggleSessionScope', () => {
+      tree.toggleScope();
+      refresh();
+    }),
+    vscode.commands.registerCommand('piCode.toggleArchived', () => {
+      const on = tree.toggleArchived();
+      vscode.window.setStatusBarMessage(on ? 'Pi Code: showing archived sessions' : 'Pi Code: archived sessions hidden', 2500);
+    }),
+    vscode.commands.registerCommand('piCode.renameSession', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (!s) return;
+      const name = await vscode.window.showInputBox({ title: 'Rename session', value: tree.displayName(s) });
+      if (name === undefined) return;
+      const trimmed = name.trim();
+      const wroteToPi = trimmed ? await provider.renameOpenSession(s.file, trimmed) : false;
+      // Closed sessions keep the name locally; pi only accepts set_session_name on a running one.
+      await tree.setName(s.file, wroteToPi ? undefined : trimmed || undefined);
+      refresh();
+    }),
+    vscode.commands.registerCommand('piCode.archiveSession', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (s) await tree.setArchived(s.file, true);
+    }),
+    vscode.commands.registerCommand('piCode.unarchiveSession', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (s) await tree.setArchived(s.file, false);
+    }),
+    vscode.commands.registerCommand('piCode.deleteSession', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (!s) return;
+      const ok = await vscode.window.showWarningMessage(`Delete session "${tree.displayName(s)}"? The file is removed from disk.`, { modal: true, detail: s.file }, 'Delete');
+      if (ok !== 'Delete') return;
+      provider.detachSession(s.file);
+      try {
+        deleteSession(s.file);
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Could not delete: ${err.message}`);
+      }
+      await tree.setArchived(s.file, false);
+      await tree.setName(s.file, undefined);
+      refresh();
+    }),
+    vscode.commands.registerCommand('piCode.revealSession', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (s) await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(s.file));
+    }),
+    vscode.commands.registerCommand('piCode.copySessionId', async (node?: SessionNode) => {
+      const s = sessionOf(node);
+      if (!s) return;
+      await vscode.env.clipboard.writeText(s.id);
+      vscode.window.showInformationMessage(`Session id copied: ${s.id}`);
+    }),
     provider,
   );
 }

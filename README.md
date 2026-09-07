@@ -38,6 +38,25 @@ Requires pi ≥ 0.84 (the RPC protocol with `agent_settled`, `get_entries` and t
 - Rename (also sets pi's session name), new session in the same task, compact context, export to HTML, copy session path, restart the pi process.
 - Footer shows session, model, thinking level, context usage, token counts and cost after each run.
 
+## Sessions and reasoning effort
+
+**Sessions view.** The Pi Code container has a second view listing every pi session recorded for the
+workspace, grouped by recency (Today / Yesterday / This week / This month / Older). Each row shows the
+session name or its first prompt, age, message count and the model it last ran on; open sessions are marked,
+and a running one spins. One click opens a session as a task, or focuses the task that already holds it.
+The title bar has search, a workspace/all toggle, archived visibility and refresh; the row menu has rename,
+archive, copy id, reveal file and delete. Archive and local renames are stored in the extension, never by
+rewriting pi's session files; renaming a session that is currently open also sends `set_session_name` to pi
+so the name lands in the file. The list refreshes itself as pi appends to sessions.
+
+**Reasoning effort.** Gateways that put the effort into the model id (`gpt-6-astra-xhigh-fast`) leave pi's
+own thinking selector inert, because effort is not a request parameter there. Pi Code parses the ids into
+family, effort and speed and offers three controls: a model family dropdown, an effort ladder built from the
+variants that actually exist for that family, and a `fast` toggle. Switching family keeps the effort where
+possible and falls back to the nearest lower level when the new family has a shorter ladder, saying so in the
+transcript. `Cmd/Ctrl+Alt+E` steps the effort one notch. Where a provider does support real thinking levels,
+the native selector appears instead and `set_thinking_level` is used.
+
 ## Install
 
 Build from source (needs Node ≥ 18 and the `code` CLI):
@@ -54,21 +73,24 @@ Then run `Developer: Reload Window`. The Pi Code icon appears in the activity ba
 | Setting | Default | Meaning |
 |---|---|---|
 | `piCode.piCommand` | `""` | Path to `pi`. Empty searches PATH plus `/usr/local/bin`, `/opt/homebrew/bin` and nvm installs, so a wrapper script in `/usr/local/bin` is found even when the extension host has a bare PATH. |
-| `piCode.defaultModel` | `""` | Passed as `--model` for new tasks, e.g. `litellm/claude-opus-4-8`. Empty uses pi's `defaultModel`. |
+| `piCode.defaultModel` | `""` | Passed as `--model` for new tasks, e.g. `litellm/gpt-6-astra-max`. Empty uses pi's `defaultModel`. |
 | `piCode.defaultThinkingLevel` | `""` | Applied to fresh sessions when the model reports reasoning support. |
 | `piCode.extraArgs` | `[]` | Extra arguments for `pi --mode rpc`. |
 | `piCode.sendOnEnter` | `true` | Enter sends, Shift+Enter inserts a newline. Off: Ctrl/Cmd+Enter sends. |
 | `piCode.restoreTasks` | `true` | Reopen last tasks and their sessions per workspace. |
 | `piCode.contextFileMaxKb` | `96` | Size limit for files inlined via `@mention` / Add File. |
 | `piCode.showThinking` | `true` | Render thinking blocks. |
+| `piCode.defaultEffort` | `""` | Reasoning effort for new tasks on gateways that encode it in the model id. |
+| `piCode.preferFastVariants` | `false` | Prefer the `-fast` variant when switching family or effort. |
 
-A model shows `No thinking` when pi's `models.json` has `reasoning: false` for it; that is pi's configuration, not the extension's.
+When a provider reports no thinking levels, the native selector is hidden and the family/effort controls take over; see the section above.
 
 ## Development
 
 ```bash
 npm run compile          # tsc
-node scripts/webview-check.js   # renders the sidebar in a DOM stub, checks markdown/diff/escaping
+npm run check            # tsc + model-tier parsing + sidebar render in a DOM stub
+node scripts/sessions-check.js  # session listing against the real ~/.pi store (read-only)
 npm run smoke            # drives a real `pi --mode rpc` end to end (one small model call)
 npm run package          # builds the .vsix
 ```

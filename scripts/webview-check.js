@@ -65,8 +65,9 @@ dispatch({
       cwd: '/repo',
       alive: true,
       streaming: true,
-      model: 'litellm/claude-opus-4-8',
-      thinking: 'high',
+      model: 'litellm/gpt-6-astra-xhigh-fast',
+      tier: { family: 'gpt-6-astra', effort: 'xhigh', fast: true },
+      thinking: 'off',
       sessionId: 'abcdef123',
       stats: { tokens: { input: 12000, output: 800 }, cost: 0.123, contextUsage: { percent: 12 } },
       widgets: { w: ['line 1', 'line 2'] },
@@ -84,6 +85,15 @@ dispatch({
       ],
     },
   ],
+});
+dispatch({
+  type: 'modelOptions',
+  taskId: 't1',
+  families: [
+    { family: 'gpt-6-astra', label: 'GPT-6 Astra', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], hasFast: true, hasBase: true },
+    { family: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['low', 'medium', 'high'], hasFast: true, hasBase: true },
+  ],
+  levels: ['off'],
 });
 const out = nodes.messages.innerHTML;
 const expect = (cond, msg) => {
@@ -108,6 +118,12 @@ expect(out.includes('exit 0'), 'direct bash block');
 expect(out.includes('401 blocked'), 'assistant error box');
 expect(out.includes('Thinking'), 'thinking block');
 expect(nodes.footer.innerHTML.includes('ctx 12%') && nodes.footer.innerHTML.includes('$0.123'), 'footer stats');
+expect(nodes.footer.innerHTML.includes('xhigh fast'), 'footer shows effort and speed');
+expect(nodes.family.innerHTML.includes('GPT-6 Astra') && nodes.family.innerHTML.includes('selected'), 'family selector populated with current selected');
+expect(nodes.effort.innerHTML.includes('>xhigh<') && nodes.effort.innerHTML.includes('>max<'), 'effort ladder from the current family');
+expect(nodes.effort.disabled === false, 'effort selector enabled');
+expect(nodes.fast.className === 'primary', 'fast toggle reflects state');
+expect(nodes.thinking.style.display === 'none', 'thinking selector hidden when the provider has no levels');
 expect(nodes.queue.innerHTML.includes('steer: do x'), 'queue shown');
 expect(nodes.send.style.display === 'none' && nodes.stop.style.display === '', 'composer switches to steer/stop while streaming');
 console.log('webview check passed');

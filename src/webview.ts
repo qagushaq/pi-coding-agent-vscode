@@ -101,8 +101,10 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
 <body>
   <div class="tabs" id="tabs"></div>
   <div class="toolbar">
-    <select id="models" title="Model"><option value="">Model…</option></select>
-    <select id="thinking" title="Thinking level"><option value="">Thinking</option></select>
+    <select id="family" title="Model family"><option value="">Model…</option></select>
+    <select id="effort" title="Reasoning effort"><option value="">Effort</option></select>
+    <button id="fast" title="Prefer the -fast variant of this model">fast</button>
+    <select id="thinking" title="Thinking level" style="display:none"></select>
     <div class="menu"><button id="menuBtn" title="More">⋯</button>
       <div class="menu-list" id="menu">
         <button data-act="newTask">New task</button>
@@ -149,8 +151,7 @@ var messagesEl=$('messages'), inputEl=$('input');
 vscode.postMessage({type:'ready'});
 window.addEventListener('message',function(e){var m=e.data;
   if(m.type==='state'){state=m;render();}
-  else if(m.type==='models'){perTask[m.taskId]=perTask[m.taskId]||{};perTask[m.taskId].models=m.models||[];renderSelectors();}
-  else if(m.type==='thinkingLevels'){perTask[m.taskId]=perTask[m.taskId]||{};perTask[m.taskId].levels=m.levels||[];renderSelectors();}
+  else if(m.type==='modelOptions'){perTask[m.taskId]=Object.assign(perTask[m.taskId]||{},{families:m.families||[],levels:m.levels||[]});renderSelectors();}
   else if(m.type==='commands'){perTask[m.taskId]=perTask[m.taskId]||{};perTask[m.taskId].commands=m.commands||[];}
   else if(m.type==='addContext'){addChip(m.chip);}
   else if(m.type==='insertMention'){insertAtCursor('@'+m.path+' ');}
@@ -162,6 +163,7 @@ window.addEventListener('message',function(e){var m=e.data;
 
 function active(){for(var i=0;i<state.tasks.length;i++)if(state.tasks[i].id===state.activeTaskId)return state.tasks[i];return null;}
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function escAttr(s){return esc(s);} // esc already escapes quotes; kept as a separate name for attribute call sites
 function short(p){if(!p)return '';var t=active();if(t&&t.cwd&&p.indexOf(t.cwd)===0)p=p.slice(t.cwd.length).replace(/^[\\/\\\\]/,'');return p;}
 
 function render(){renderTabs();renderChanged();renderMessages();renderSelectors();renderComposer();renderFooter();renderQueue();renderWidget();}
@@ -210,14 +212,33 @@ function bindMessageHandlers(){[].forEach.call(messagesEl.querySelectorAll('.too
   [].forEach.call(messagesEl.querySelectorAll('.md .copy'),function(b){b.onclick=function(){vscode.postMessage({type:'copyText',text:b.parentElement.querySelector('code').textContent});b.textContent='copied';setTimeout(function(){b.textContent='copy';},1200);};});
   [].forEach.call(messagesEl.querySelectorAll('.md a[href]'),function(a){a.onclick=function(ev){ev.preventDefault();vscode.postMessage({type:'openLink',href:a.getAttribute('href')});};});}
 
-function renderSelectors(){var t=active();var info=t?perTask[t.id]||{}:{};var ms=$('models');var cur=t&&t.model?t.model:'';var models=info.models||[];
-  var html='<option value="">Model…</option>';models.forEach(function(m){var id=(m.provider?m.provider+'/':'')+m.id;html+='<option value="'+esc(id)+'"'+(id===cur?' selected':'')+'>'+esc(m.id)+(m.provider&&models.some(function(o){return o.provider!==m.provider;})?' · '+esc(m.provider):'')+'</option>';});
-  if(cur&&!models.some(function(m){return (m.provider?m.provider+'/':'')+m.id===cur;}))html+='<option value="'+esc(cur)+'" selected>'+esc(cur)+'</option>';ms.innerHTML=html;
-  var th=$('thinking');var levels=info.levels||[];var curL=t&&t.thinking?t.thinking:'';var h2='';if(!levels.length||(levels.length===1&&levels[0]==='off')){h2='<option value="">No thinking</option>';th.disabled=true;}else{th.disabled=false;levels.forEach(function(l){h2+='<option value="'+esc(l)+'"'+(l===curL?' selected':'')+'>think: '+esc(l)+'</option>';});}th.innerHTML=h2;}
-
+function renderSelectors(){
+  var t=active();var info=t?perTask[t.id]||{}:{};var fams=info.families||[];
+  var cur=t&&t.tier?t.tier:{};
+  var fs=$('family');
+  fs.innerHTML=(fams.length?'':'<option value="">Model…</option>')+fams.map(function(f){
+    return '<option value="'+escAttr(f.family)+'"'+(f.family===cur.family?' selected':'')+'>'+esc(f.label)+'</option>';}).join('');
+  if(cur.family&&!fams.some(function(f){return f.family===cur.family;}))
+    fs.innerHTML='<option value="'+escAttr(cur.family)+'" selected>'+esc(cur.family)+'</option>'+fs.innerHTML;
+  var fam=fams.filter(function(f){return f.family===cur.family;})[0];
+  var es=$('effort');var efforts=fam?fam.efforts:[];
+  if(!efforts.length){es.innerHTML='<option value="">no effort levels</option>';es.disabled=true;}
+  else{es.disabled=false;es.innerHTML=efforts.map(function(e){
+    return '<option value="'+escAttr(e)+'"'+(e===cur.effort?' selected':'')+'>'+esc(e)+'</option>';}).join('');}
+  var fb=$('fast');
+  if(fam&&fam.hasFast){fb.style.display='';fb.className=cur.fast?'primary':'';fb.title=cur.fast?'Fast variant on':'Fast variant off';}
+  else fb.style.display='none';
+  var th=$('thinking');var levels=info.levels||[];
+  if(levels.length>1){th.style.display='';th.innerHTML=levels.map(function(l){
+    return '<option value="'+escAttr(l)+'"'+(l===(t&&t.thinking)?' selected':'')+'>think: '+esc(l)+'</option>';}).join('');}
+  else th.style.display='none';
+}
 function renderComposer(){var t=active();var s=!!(t&&t.streaming);var alive=!!(t&&t.alive);$('send').style.display=s?'none':'';$('steer').style.display=s?'':'none';$('queueBtn').style.display=s?'':'none';$('stop').style.display=s?'':'none';$('send').disabled=!alive;$('send').textContent=alive?'Send':'pi not running';}
 function renderFooter(){var t=active();var f=$('footer');if(!t){f.innerHTML='';return;}var parts=[];if(t.sessionName)parts.push('<span title="'+esc(t.sessionFile||'')+'">'+esc(t.sessionName)+'</span>');else if(t.sessionId)parts.push('<span title="'+esc(t.sessionFile||'')+'">session '+esc(t.sessionId.slice(0,8))+'</span>');
-  if(t.model)parts.push('<span>'+esc(t.model.split('/').pop())+(t.thinking&&t.thinking!=='off'?' · '+esc(t.thinking):'')+'</span>');
+  if(t.model){var tier=t.tier||{};var lbl=esc(t.model.split('/').pop());
+    if(tier.effort)lbl+=' · '+esc(tier.effort)+(tier.fast?' fast':'');
+    else if(t.thinking&&t.thinking!=='off')lbl+=' · '+esc(t.thinking);
+    parts.push('<span>'+lbl+'</span>');}
   var st=t.stats;if(st){if(st.contextUsage&&st.contextUsage.percent!=null)parts.push('<span title="context window">ctx '+Math.round(st.contextUsage.percent)+'%</span>');if(st.tokens)parts.push('<span title="input / output tokens">'+fmt(st.tokens.input)+' in · '+fmt(st.tokens.output)+' out</span>');if(st.cost!=null&&st.cost>0)parts.push('<span>$'+st.cost.toFixed(st.cost<1?3:2)+'</span>');}
   f.innerHTML=parts.join('<span>·</span>');}
 function renderQueue(){var t=active();var q=t&&t.queue;var el=$('queue');var items=[];if(q){(q.steering||[]).forEach(function(x){items.push('steer: '+x);});(q.followUp||[]).forEach(function(x){items.push('queued: '+x);});}if(!items.length){el.style.display='none';return;}el.style.display='';el.innerHTML=items.map(function(x){return '<div>'+esc(x.slice(0,200))+'</div>';}).join('');}
@@ -238,7 +259,9 @@ function send(mode){var text=inputEl.value.trim();if(!text&&!chips.length)return
 $('send').onclick=function(){send('prompt');};$('steer').onclick=function(){send('steer');};$('queueBtn').onclick=function(){send('followUp');};
 $('stop').onclick=function(){vscode.postMessage({type:'stop'});};
 $('attach').onclick=function(){vscode.postMessage({type:'attachImage'});};$('addSel').onclick=function(){vscode.postMessage({type:'addSelection'});};$('atFile').onclick=function(){vscode.postMessage({type:'pickFile'});};
-$('models').onchange=function(e){if(e.target.value)vscode.postMessage({type:'setModel',modelId:e.target.value});};
+$('family').onchange=function(e){if(e.target.value)vscode.postMessage({type:'setTier',family:e.target.value});};
+$('effort').onchange=function(e){if(e.target.value)vscode.postMessage({type:'setTier',effort:e.target.value});};
+$('fast').onclick=function(){var t=active();vscode.postMessage({type:'setTier',fast:!(t&&t.tier&&t.tier.fast)});};
 $('thinking').onchange=function(e){if(e.target.value)vscode.postMessage({type:'setThinking',level:e.target.value});};
 $('menuBtn').onclick=function(ev){ev.stopPropagation();$('menu').classList.toggle('open');};
 document.addEventListener('click',function(){$('menu').classList.remove('open');});
