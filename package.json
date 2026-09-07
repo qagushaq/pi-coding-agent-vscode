@@ -81,6 +81,12 @@
         "category": "Pi Code"
       },
       {
+        "command": "piCode.rewind",
+        "title": "Rewind Conversation",
+        "category": "Pi Code",
+        "icon": "$(discard)"
+      },
+      {
         "command": "piCode.focus",
         "title": "Focus Chat",
         "category": "Pi Code"

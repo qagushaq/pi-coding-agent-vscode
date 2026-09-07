@@ -126,4 +126,29 @@ expect(nodes.fast.className === 'primary', 'fast toggle reflects state');
 expect(nodes.thinking.style.display === 'none', 'thinking selector hidden when the provider has no levels');
 expect(nodes.queue.innerHTML.includes('steer: do x'), 'queue shown');
 expect(nodes.send.style.display === 'none' && nodes.stop.style.display === '', 'composer switches to steer/stop while streaming');
+expect(!out.includes('data-rewind'), 'no rewind buttons while the agent streams');
+
+// Same task, idle: user messages must offer a rewind point numbered by user-message order.
+dispatch({
+  type: 'state',
+  activeTaskId: 't1',
+  settings: { sendOnEnter: true, showThinking: true },
+  tasks: [
+    {
+      id: 't1', name: 'Task 1', cwd: '/repo', alive: true, streaming: false,
+      model: 'litellm/gpt-6-astra-max', tier: { family: 'gpt-6-astra', effort: 'max', fast: false },
+      thinking: 'off', sessionId: 'abcdef123', widgets: {}, queue: { steering: [], followUp: [] }, changedFiles: [],
+      messages: [
+        { id: 'u1', role: 'user', text: 'first' },
+        { id: 'a1', role: 'assistant', text: 'ok', thinking: '', status: 'done' },
+        { id: 'u2', role: 'user', text: 'second' },
+        { id: 'a2', role: 'assistant', text: 'ok', thinking: '', status: 'done' },
+      ],
+    },
+  ],
+});
+const idle = nodes.messages.innerHTML;
+const expectIdle = (cond, msg) => { if (!cond) { console.error(idle); throw new Error(`FAIL: ${msg}`); } console.log(`ok - ${msg}`); };
+expectIdle(idle.includes('data-rewind="0"') && idle.includes('data-rewind="1"'), 'rewind buttons numbered per user message');
+expectIdle((idle.match(/data-rewind=/g) || []).length === 2, 'only user messages get a rewind button');
 console.log('webview check passed');

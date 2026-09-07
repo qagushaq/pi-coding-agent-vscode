@@ -50,6 +50,10 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
   .msg{max-width:100%;border-radius:8px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere;min-width:0}
   .msg.user{align-self:flex-end;background:var(--vscode-input-background);border:1px solid var(--border);padding:8px 11px;max-width:92%;white-space:pre-wrap}
   .msg.user .imgs{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.msg.user .imgs img{max-width:120px;max-height:90px;border-radius:5px;border:1px solid var(--border)}
+  .msg.user{position:relative}
+  .msg.user .rew{position:absolute;top:2px;right:100%;margin-right:6px;opacity:0;transition:opacity .12s;background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1}
+  .msg.user:hover .rew{opacity:1}
+  .msg.user .rew:hover{background:var(--vscode-toolbar-hoverBackground,var(--border));color:var(--fg)}
   .msg.assistant{align-self:stretch;padding:2px 4px}
   .msg.assistant.error .md{opacity:.8}
   .msg .errbox{border:1px solid var(--err);color:var(--err);border-radius:6px;padding:6px 9px;margin-top:6px;font-family:var(--mono);font-size:11px;white-space:pre-wrap}
@@ -181,11 +185,12 @@ function renderChanged(){var t=active();var box=$('changed');if(!t||!t.changedFi
 function renderMessages(){var t=active();var el=messagesEl;var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
   if(!t){el.innerHTML='<div class="empty">No task. Press ＋ to start one.</div>';return;}
   if(!t.messages.length){el.innerHTML='<div class="empty">Session '+esc((t.sessionId||'').slice(0,8))+' in <b>'+esc(short(t.cwd)||t.cwd)+'</b><br>Type a prompt. <kbd>@</kbd> mentions a file, <kbd>/</kbd> lists commands, <kbd>!cmd</kbd> runs a shell command into context.<br>'+(state.settings.sendOnEnter?'<kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> newline.':'<kbd>Ctrl/Cmd+Enter</kbd> sends.')+'</div>';return;}
-  var html='';t.messages.forEach(function(m){html+=renderMessage(m,t);});el.innerHTML=html;bindMessageHandlers();
+  var html='';var ui=0;t.messages.forEach(function(m){if(m.role==='user')m.userIndex=ui++;html+=renderMessage(m,t);});el.innerHTML=html;bindMessageHandlers();
   if(atBottom||wasAtBottom)el.scrollTop=el.scrollHeight;wasAtBottom=false;}
 
 function renderMessage(m,t){
-  if(m.role==='user'){return '<div class="msg user">'+esc(m.text)+(m.images&&m.images.length?'<div class="imgs">'+m.images.map(function(i){return '<img src="data:'+esc(i.mimeType)+';base64,'+i.data+'">';}).join('')+'</div>':'')+'</div>';}
+  if(m.role==='user'){var rw=(typeof m.userIndex==='number'&&!t.streaming)?'<button class="rew" data-rewind="'+m.userIndex+'" title="Rewind the conversation to just before this message">\u21b6</button>':'';
+    return '<div class="msg user">'+rw+esc(m.text)+(m.images&&m.images.length?'<div class="imgs">'+m.images.map(function(i){return '<img src="data:'+esc(i.mimeType)+';base64,'+i.data+'">';}).join('')+'</div>':'')+'</div>';}
   if(m.role==='assistant'){var h='<div class="msg assistant'+(m.status==='error'?' error':'')+'">';
     if(m.thinking&&state.settings.showThinking){h+='<details class="think"'+(m.status==='streaming'&&!m.text?' open':'')+'><summary>Thinking'+(m.status==='streaming'&&!m.text?'…':'')+'</summary><div class="body">'+esc(m.thinking)+'</div></details>';}
     h+='<div class="md'+(m.status==='streaming'?' cursor':'')+'">'+md(m.text)+'</div>';
@@ -210,7 +215,8 @@ function renderTool(m){var open=openTools[m.id]!==undefined?openTools[m.id]:(m.s
 
 function bindMessageHandlers(){[].forEach.call(messagesEl.querySelectorAll('.tool .head'),function(h){h.onclick=function(ev){if(ev.target.dataset.open){vscode.postMessage({type:'openFile',path:ev.target.dataset.open});return;}if(ev.target.dataset.diff){vscode.postMessage({type:'openDiff',path:ev.target.dataset.diff});return;}var box=h.parentElement;box.classList.toggle('open');openTools[box.dataset.tool]=box.classList.contains('open');};});
   [].forEach.call(messagesEl.querySelectorAll('.md .copy'),function(b){b.onclick=function(){vscode.postMessage({type:'copyText',text:b.parentElement.querySelector('code').textContent});b.textContent='copied';setTimeout(function(){b.textContent='copy';},1200);};});
-  [].forEach.call(messagesEl.querySelectorAll('.md a[href]'),function(a){a.onclick=function(ev){ev.preventDefault();vscode.postMessage({type:'openLink',href:a.getAttribute('href')});};});}
+  [].forEach.call(messagesEl.querySelectorAll('.md a[href]'),function(a){a.onclick=function(ev){ev.preventDefault();vscode.postMessage({type:'openLink',href:a.getAttribute('href')});};});
+  [].forEach.call(messagesEl.querySelectorAll('.msg.user .rew'),function(b){b.onclick=function(){vscode.postMessage({type:'rewind',index:Number(b.dataset.rewind)});};});}
 
 function renderSelectors(){
   var t=active();var info=t?perTask[t.id]||{}:{};var fams=info.families||[];

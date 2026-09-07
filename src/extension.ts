@@ -115,6 +115,9 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       case 'compact':
         await this.compactActive();
         break;
+      case 'rewind':
+        await this.rewind(typeof msg.index === 'number' ? msg.index : undefined);
+        break;
       case 'exportHtml':
         await this.exportActiveHtml();
         break;
@@ -662,6 +665,54 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     await this.afterRun(task);
   }
 
+  /**
+   * Rewinds the session to just before one of the user's own messages, the way Claude Code's rewind works.
+   * pi has no dedicated undo: `fork` moves the session leaf to the parent of the chosen user entry and hands
+   * the prompt text back, so we restore it into the composer for editing.
+   */
+  async rewind(userIndex?: number): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    if (task.conv.streaming) {
+      vscode.window.showWarningMessage('Pi is still working. Stop it before rewinding.');
+      return;
+    }
+    const list = await task.proc.request({ type: 'get_fork_messages' });
+    if (!list.success) {
+      task.conv.system(list.error || 'Could not read the rewind points', 'error');
+      this.postState();
+      return;
+    }
+    const points: { entryId: string; text: string }[] = list.data?.messages || [];
+    if (!points.length) {
+      vscode.window.showInformationMessage('Nothing to rewind to in this session yet.');
+      return;
+    }
+    let target = typeof userIndex === 'number' ? points[userIndex] : undefined;
+    if (!target) {
+      const pick = await vscode.window.showQuickPick(
+        points
+          .map((p, i) => ({ label: `$(discard) ${p.text.replace(/\s+/g, ' ').trim().slice(0, 70) || '(empty prompt)'}`, description: `message ${i + 1} of ${points.length}`, p }))
+          .reverse(),
+        { title: 'Rewind to just before which message?', placeHolder: 'Everything after it is dropped from the conversation' },
+      );
+      target = pick?.p;
+    }
+    if (!target) return;
+    const r = await task.proc.request({ type: 'fork', entryId: target.entryId });
+    if (!r.success || r.data?.cancelled) {
+      task.conv.system(r.error || 'Rewind cancelled', 'warning');
+      this.postState();
+      return;
+    }
+    const msgs = await task.proc.request({ type: 'get_messages' });
+    if (msgs.success) task.conv.load(msgs.data?.messages || []);
+    task.conv.system('Rewound to before that message. The prompt is back in the composer; the files pi already changed are untouched.', 'system');
+    this.view?.webview.postMessage({ type: 'setEditorText', text: typeof r.data?.text === 'string' ? r.data.text : target.text });
+    await this.afterRun(task);
+    this.focus();
+  }
+
   async newSessionInActive(): Promise<void> {
     const task = this.activeTask();
     if (!task?.proc?.alive) return;
@@ -987,6 +1038,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.resumeSession', () => provider.resumeSession()),
     vscode.commands.registerCommand('piCode.newSession', () => provider.newSessionInActive()),
     vscode.commands.registerCommand('piCode.compact', () => provider.compactActive()),
+    vscode.commands.registerCommand('piCode.rewind', () => provider.rewind()),
     vscode.commands.registerCommand('piCode.focus', () => provider.focus()),
     vscode.commands.registerCommand('piCode.cycleEffort', () => provider.cycleEffort()),
     vscode.commands.registerCommand('piCode.pickModel', () => provider.pickModel()),
