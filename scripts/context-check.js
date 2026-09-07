@@ -12,13 +12,18 @@ let config = { autoContext: 'selection', shareDiagnostics: true, contextFileMaxK
 
 const vscodeStub = {
   DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
-  window: { get activeTextEditor() { return editor; }, createStatusBarItem: () => ({ dispose() {} }), createOutputChannel: () => ({ appendLine() {}, dispose() {} }) },
+  window: {
+    get activeTextEditor() { return editor; },
+    createStatusBarItem: () => ({ show() { this.visible = true; }, hide() { this.visible = false; }, dispose() {} }),
+    createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+  },
   languages: { getDiagnostics: () => diagnostics },
   workspace: { getConfiguration: () => ({ get: (k, d) => (config[k] !== undefined ? config[k] : d) }), workspaceFolders: [] },
   StatusBarAlignment: { Left: 1 },
   Uri: { file: p => ({ fsPath: p, scheme: 'file' }) },
   EventEmitter: class { constructor() { this.event = () => {}; } fire() {} },
   ThemeIcon: class {},
+  ThemeColor: class { constructor(id) { this.id = id; } },
   TreeItem: class {},
   TreeItemCollapsibleState: {},
   commands: { registerCommand: () => ({ dispose() {} }) },
@@ -73,6 +78,31 @@ ok(build('/repo') === '', 'off means off');
 config.autoContext = 'selection';
 
 ok(build('/repo', ['/repo/app/models/user.rb']) === '', 'a file already attached by hand is not repeated');
+
+// --- status bar readout ---
+const status = provider.status;
+const task = { id: 't1', name: 'Task 1', alive: true, conv: { streaming: false }, tier: {}, model: 'litellm/gpt-6-astra-max', stats: { cost: 0.42, contextUsage: { percent: 7 } } };
+provider.tasks.set('t1', task);
+provider.activeTaskId = 't1';
+
+provider.renderStatus();
+ok(status.text === '$(hubot) Pi $0.42', `idle status shows cost: ${status.text}`);
+ok(String(status.tooltip).includes('gpt-6-astra-max') && String(status.tooltip).includes('7%'), 'tooltip carries model and context usage');
+
+task.conv.streaming = true;
+provider.renderStatus();
+ok(status.text.startsWith('$(sync~spin)'), 'working status spins');
+
+task.conv.streaming = false;
+task.alive = false;
+provider.renderStatus();
+ok(status.text.includes('debug-disconnect') && !!status.backgroundColor, 'a dead pi is flagged in the status bar');
+
+task.alive = true;
+config.statusBar = false;
+provider.renderStatus();
+ok(status.visible === false, 'status bar can be turned off');
+config.statusBar = true;
 
 console.log(failed ? `\nFAILED (${failed})` : '\ncontext check passed');
 process.exit(failed ? 1 : 0);

@@ -379,6 +379,11 @@
           "type": "boolean",
           "default": true,
           "description": "Include errors and warnings that VS Code reports for the active file (up to 20)."
+        },
+        "piCode.statusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep a Pi Code readout in the status bar: idle or working, cost so far, model and context usage in the tooltip."
         }
       }
     }

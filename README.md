@@ -51,6 +51,11 @@ attaching anything: the active file and cursor line, the selected text when ther
 (`piCode.autoContext`), and the errors and warnings VS Code reports for that file
 (`piCode.shareDiagnostics`). A file you attached by hand is never repeated.
 
+**Editor tab and status bar.** `Pi Code: Open Chat in Editor Tab` puts the same chat in a wide editor
+column next to the code; the sidebar and the tab stay in sync and either one can drive the task. The status
+bar keeps a readout of whether pi is idle, working or stopped, with the cost so far and the model, effort and
+context usage in its tooltip; clicking it focuses the chat.
+
 ## Sessions and reasoning effort
 
 **Sessions view.** The Pi Code container has a second view listing every pi session recorded for the
@@ -97,6 +102,7 @@ Then run `Developer: Reload Window`. The Pi Code icon appears in the activity ba
 | `piCode.preferFastVariants` | `false` | Prefer the `-fast` variant when switching family or effort. |
 | `piCode.autoContext` | `"selection"` | What the active editor adds to every prompt: `off`, `file` (path and line) or `selection` (also inlines the selected text). |
 | `piCode.shareDiagnostics` | `true` | Send the errors and warnings VS Code reports for the active file. |
+| `piCode.statusBar` | `true` | Keep a Pi Code readout in the status bar (state, cost, model and context in the tooltip). |
 
 When a provider reports no thinking levels, the native selector is hidden and the family/effort controls take over; see the section above.
 

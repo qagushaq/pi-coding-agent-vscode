@@ -46,6 +46,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private activeTaskId?: string;
   private restored = false;
   private status: vscode.StatusBarItem;
+  private extStatus: vscode.StatusBarItem;
   private renderTimer?: NodeJS.Timeout;
   private output: vscode.OutputChannel;
   tree?: SessionTreeProvider;
@@ -53,8 +54,12 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   constructor(private context: vscode.ExtensionContext) {
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
     this.status.name = 'Pi Code';
+    this.status.command = 'piCode.focus';
+    // pi's own extensions can push a status line of their own; it must not fight with ours.
+    this.extStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 49);
+    this.extStatus.name = 'Pi Code (extension)';
     this.output = vscode.window.createOutputChannel('Pi Code');
-    context.subscriptions.push(this.status, this.output);
+    context.subscriptions.push(this.status, this.extStatus, this.output);
   }
 
   /* ------------------------------------------------------------------ webview */
@@ -459,10 +464,10 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       }
       case 'setStatus': {
         if (req.statusText) {
-          this.status.text = `$(hubot) ${req.statusText}`;
-          this.status.show();
+          this.extStatus.text = `$(hubot) ${req.statusText}`;
+          this.extStatus.show();
         } else {
-          this.status.hide();
+          this.extStatus.hide();
         }
         break;
       }
@@ -1048,19 +1053,43 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     }));
     this.persistTasks();
     this.tree?.setOpen([...this.tasks.values()].filter(t => t.sessionFile).map(t => ({ file: t.sessionFile!, taskId: t.id, streaming: t.conv.streaming })));
-    const active = this.activeTask();
-    if (active?.conv.streaming) {
-      this.status.text = `$(sync~spin) pi: ${active.name}`;
-      this.status.show();
-    } else if (this.status.text.startsWith('$(sync~spin)')) {
-      this.status.hide();
-    }
+    this.renderStatus();
     this.post({
       type: 'state',
       activeTaskId: this.activeTaskId,
       tasks,
       settings: { sendOnEnter: cfg.get<boolean>('sendOnEnter', true), showThinking: cfg.get<boolean>('showThinking', true) },
     });
+  }
+
+  /** A permanent readout of what pi is doing, the way Claude's extension keeps one in the status bar. */
+  private renderStatus(): void {
+    if (!this.config().get<boolean>('statusBar', true)) {
+      this.status.hide();
+      return;
+    }
+    const t = this.activeTask();
+    if (!t) {
+      this.status.hide();
+      return;
+    }
+    const cost = typeof t.stats?.cost === 'number' && t.stats.cost > 0 ? ` $${t.stats.cost.toFixed(2)}` : '';
+    const ctx = t.stats?.contextUsage?.percent;
+    this.status.text = t.conv.streaming
+      ? `$(sync~spin) Pi${cost}`
+      : t.alive
+        ? `$(hubot) Pi${cost}`
+        : '$(debug-disconnect) Pi';
+    const lines = [
+      t.conv.streaming ? `Working on ${t.name}` : t.alive ? `Idle in ${t.name}` : `pi is not running in ${t.name}`,
+      t.model ? `Model: ${t.model}${t.tier.effort ? ` (${t.tier.effort}${t.tier.fast ? ' fast' : ''})` : ''}` : '',
+      typeof ctx === 'number' ? `Context: ${ctx}% of the window` : '',
+      cost ? `Cost so far:${cost}` : '',
+      'Click to focus the chat.',
+    ].filter(Boolean);
+    this.status.tooltip = lines.join('\n');
+    this.status.backgroundColor = t.alive ? undefined : new vscode.ThemeColor('statusBarItem.warningBackground');
+    this.status.show();
   }
 
   private report(err: any): void {
