@@ -1,8 +1,8 @@
 {
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
-  "description": "VS Code UI wrapper for Pi coding agent RPC",
-  "version": "0.1.0",
+  "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
+  "version": "0.2.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -10,12 +10,6 @@
   "categories": [
     "AI",
     "Other"
-  ],
-  "activationEvents": [
-    "onView:piCode.chatView",
-    "onCommand:piCode.newTask",
-    "onCommand:piCode.stopTask",
-    "onCommand:piCode.restartTask"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -40,15 +34,95 @@
     "commands": [
       {
         "command": "piCode.newTask",
-        "title": "Pi Code: New Task"
+        "title": "New Task",
+        "category": "Pi Code",
+        "icon": "$(add)"
       },
       {
         "command": "piCode.stopTask",
-        "title": "Pi Code: Stop Current Task"
+        "title": "Stop Current Task",
+        "category": "Pi Code",
+        "icon": "$(debug-stop)"
       },
       {
         "command": "piCode.restartTask",
-        "title": "Pi Code: Restart Current Task"
+        "title": "Restart Current Task",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.addSelection",
+        "title": "Add Selection to Pi Chat",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.addFile",
+        "title": "Add File to Pi Chat",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.resumeSession",
+        "title": "Resume Session…",
+        "category": "Pi Code",
+        "icon": "$(history)"
+      },
+      {
+        "command": "piCode.newSession",
+        "title": "New Session in Current Task",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.compact",
+        "title": "Compact Context",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.focus",
+        "title": "Focus Chat",
+        "category": "Pi Code"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "piCode.newTask",
+          "when": "view == piCode.chatView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "piCode.resumeSession",
+          "when": "view == piCode.chatView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "piCode.stopTask",
+          "when": "view == piCode.chatView",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "piCode.addSelection",
+          "group": "piCode@1"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "piCode.addFile",
+          "group": "piCode@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "piCode.addSelection",
+        "key": "ctrl+alt+l",
+        "mac": "cmd+alt+l",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "piCode.focus",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p"
       }
     ],
     "configuration": {
@@ -56,13 +130,28 @@
       "properties": {
         "piCode.piCommand": {
           "type": "string",
-          "default": "pi",
-          "description": "Pi executable command/path"
+          "default": "",
+          "description": "Pi executable. Leave empty to search PATH plus /usr/local/bin, /opt/homebrew/bin and nvm installs."
         },
         "piCode.defaultModel": {
           "type": "string",
           "default": "",
-          "description": "Optional model pattern passed to pi --model on new tasks"
+          "description": "Model passed to `pi --model` for new tasks, e.g. litellm/claude-opus-4-8. Empty uses pi's own default."
+        },
+        "piCode.defaultThinkingLevel": {
+          "type": "string",
+          "enum": [
+            "",
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": "",
+          "description": "Thinking level applied to new sessions when the model supports it. Empty keeps pi's default."
         },
         "piCode.extraArgs": {
           "type": "array",
@@ -70,7 +159,27 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra CLI arguments for pi RPC"
+          "description": "Extra CLI arguments for `pi --mode rpc`."
+        },
+        "piCode.sendOnEnter": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enter sends the message, Shift+Enter inserts a newline. When off, Ctrl/Cmd+Enter sends."
+        },
+        "piCode.restoreTasks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reopen the tasks (and their pi sessions) from the last time the panel was used in this workspace."
+        },
+        "piCode.contextFileMaxKb": {
+          "type": "number",
+          "default": 96,
+          "description": "Maximum size of a file inlined into the prompt via @mention or Add File."
+        },
+        "piCode.showThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show collapsible thinking blocks for models that stream reasoning."
         }
       }
     }
@@ -78,7 +187,9 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npm run compile && npx @vscode/vsce package --no-dependencies"
+    "smoke": "npm run compile && node scripts/smoke.js",
+    "package": "npm run compile && npx @vscode/vsce package --no-dependencies",
+    "install-local": "npm run package && code --install-extension pi-coding-agent-vscode-0.2.0.vsix --force"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",

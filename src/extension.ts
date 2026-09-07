@@ -1,255 +1,588 @@
 import * as vscode from 'vscode';
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
-import { StringDecoder } from 'string_decoder';
 import * as fs from 'fs';
 import * as path from 'path';
+import { PiProcess, RpcEvent, RpcResponse, augmentedEnv, resolvePiCommand } from './pi-process';
+import { Conversation, UiImage, UiMessage, nextId } from './conversation';
+import { listSessions, SessionInfo } from './sessions';
+import { renderWebviewHtml } from './webview';
 
-type RpcCommand = Record<string, unknown>;
-type RpcEvent = Record<string, any>;
+type ContextChip = { kind: 'selection' | 'file'; path: string; label: string; startLine?: number; endLine?: number; text: string; language?: string };
 
 type Task = {
   id: string;
   name: string;
   cwd: string;
-  proc: ChildProcessWithoutNullStreams;
-  buffer: string;
-  streaming: boolean;
+  proc?: PiProcess;
+  conv: Conversation;
   model?: string;
+  thinking?: string;
   sessionFile?: string;
   sessionId?: string;
-  messages: UiMessage[];
+  sessionName?: string;
+  stats?: any;
+  widgets: Record<string, string[]>;
+  lastError?: string;
+  alive: boolean;
+  models: any[];
+  levels: string[];
+  commands: any[];
+  currentBashId?: string;
+  bashReqId?: string;
 };
 
-type UiMessage = {
-  id: string;
-  role: 'user' | 'assistant' | 'tool' | 'system' | 'error';
-  text: string;
-  toolName?: string;
-  status?: string;
-};
-
-type PersistedTask = {
-  name: string;
-  cwd: string;
-  model?: string;
-  sessionFile?: string;
-  sessionId?: string;
-  messages: UiMessage[];
-};
+type PersistedTask = { name: string; cwd: string; model?: string; sessionFile?: string; sessionId?: string; messages?: UiMessage[] };
 
 const TASKS_STATE_KEY = 'piCode.tasks';
 const ACTIVE_TASK_STATE_KEY = 'piCode.activeTaskId';
 
-class PiRpcTask {
-  readonly task: Task;
-  private onEvent: (task: Task, event: RpcEvent) => void;
-  private onExit: (task: Task, code: number | null) => void;
-  private req = 0;
-
-  constructor(task: Task, onEvent: (task: Task, event: RpcEvent) => void, onExit: (task: Task, code: number | null) => void) {
-    this.task = task;
-    this.onEvent = onEvent;
-    this.onExit = onExit;
-    this.attachReader();
-  }
-
-  send(command: RpcCommand) {
-    if (!this.task.proc.stdin.writable) return;
-    const withId = command.id ? command : { id: `req-${++this.req}`, ...command };
-    this.task.proc.stdin.write(`${JSON.stringify(withId)}\n`);
-  }
-
-  dispose() {
-    try { this.task.proc.kill(); } catch {}
-  }
-
-  private attachReader() {
-    const decoder = new StringDecoder('utf8');
-    let buffer = '';
-
-    this.task.proc.stdout.on('data', chunk => {
-      buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
-      while (true) {
-        const idx = buffer.indexOf('\n');
-        if (idx === -1) break;
-        let line = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 1);
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        if (!line.trim()) continue;
-        try {
-          this.onEvent(this.task, JSON.parse(line));
-        } catch (e: any) {
-          this.onEvent(this.task, { type: 'client_error', error: `Bad JSON from pi: ${e.message}`, line });
-        }
-      }
-    });
-
-    this.task.proc.stderr.on('data', chunk => {
-      const text = chunk.toString();
-      if (text.trim()) this.onEvent(this.task, { type: 'stderr', text });
-    });
-
-    this.task.proc.on('exit', code => this.onExit(this.task, code));
-  }
-}
-
-class PiCodeProvider implements vscode.WebviewViewProvider {
+class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
-  private tasks = new Map<string, PiRpcTask>();
+  private tasks = new Map<string, Task>();
   private activeTaskId?: string;
+  private restored = false;
+  private status: vscode.StatusBarItem;
+  private renderTimer?: NodeJS.Timeout;
+  private output: vscode.OutputChannel;
 
-  constructor(private context: vscode.ExtensionContext) {}
+  constructor(private context: vscode.ExtensionContext) {
+    this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
+    this.status.name = 'Pi Code';
+    this.output = vscode.window.createOutputChannel('Pi Code');
+    context.subscriptions.push(this.status, this.output);
+  }
 
-  resolveWebviewView(view: vscode.WebviewView) {
+  /* ------------------------------------------------------------------ webview */
+
+  resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [this.context.extensionUri],
-    };
-    view.webview.html = this.html(view.webview);
-    view.webview.onDidReceiveMessage(async msg => {
-      switch (msg.type) {
-        case 'ready':
-          if (this.tasks.size === 0) {
-            await this.restoreTasks();
-          }
-          this.postState();
-          if (!this.activeTaskId) await this.newTask();
-          break;
-        case 'send':
-          await this.prompt(String(msg.text || ''), msg.images || []);
-          break;
-        case 'newTask':
-          await this.newTask();
-          break;
-        case 'switchTask':
+    view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
+    const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    view.webview.html = renderWebviewHtml(view.webview.cspSource, nonce);
+    view.onDidChangeVisibility(() => {
+      if (view.visible) this.postState();
+    });
+    view.webview.onDidReceiveMessage(msg => this.onWebviewMessage(msg).catch(err => this.report(err)));
+  }
+
+  private async onWebviewMessage(msg: any): Promise<void> {
+    switch (msg.type) {
+      case 'ready':
+        if (!this.restored) {
+          this.restored = true;
+          await this.restoreTasks();
+        }
+        if (!this.tasks.size) await this.newTask();
+        this.postState();
+        for (const t of this.tasks.values()) this.postTaskInfo(t);
+        break;
+      case 'send':
+        await this.send(msg.mode || 'prompt', String(msg.text || ''), msg.images || [], msg.context || []);
+        break;
+      case 'stop':
+        await this.stopActive();
+        break;
+      case 'newTask':
+        await this.newTask();
+        break;
+      case 'closeTask':
+        this.closeTask(msg.taskId);
+        break;
+      case 'switchTask':
+        if (this.tasks.has(msg.taskId)) {
           this.activeTaskId = msg.taskId;
           this.postState();
-          break;
-        case 'stop':
-          this.stopActive();
-          break;
-        case 'restart':
-          await this.restartActive();
-          break;
-        case 'renameTask':
-          await this.renameActive();
-          break;
-        case 'copySessionPath':
-          await this.copySessionPath();
-          break;
-        case 'exportHtml':
-          this.exportActiveHtml();
-          break;
-        case 'setModel':
-          this.setModel(String(msg.modelId || ''));
-          break;
-        case 'attachImage':
-          await this.attachImage();
-          break;
-      }
-    });
+          const t = this.tasks.get(msg.taskId)!;
+          this.postTaskInfo(t);
+        }
+        break;
+      case 'restart':
+        await this.restartActive();
+        break;
+      case 'rename':
+        await this.renameActive();
+        break;
+      case 'resume':
+        await this.resumeSession();
+        break;
+      case 'newSession':
+        await this.newSessionInActive();
+        break;
+      case 'compact':
+        await this.compactActive();
+        break;
+      case 'exportHtml':
+        await this.exportActiveHtml();
+        break;
+      case 'copySessionPath':
+        await this.copySessionPath();
+        break;
+      case 'setModel':
+        await this.setModel(String(msg.modelId || ''));
+        break;
+      case 'setThinking':
+        await this.setThinking(String(msg.level || ''));
+        break;
+      case 'attachImage':
+        await this.attachImage();
+        break;
+      case 'addSelection':
+        await this.addSelection();
+        break;
+      case 'pickFile':
+        await this.pickFile(typeof msg.replaceFrom === 'number' ? msg.replaceFrom : undefined);
+        break;
+      case 'openFile':
+        await this.openFile(String(msg.path || ''), msg.line);
+        break;
+      case 'openDiff':
+        await this.openDiff(String(msg.path || ''));
+        break;
+      case 'openLink':
+        if (typeof msg.href === 'string') {
+          if (/^https?:/.test(msg.href)) await vscode.env.openExternal(vscode.Uri.parse(msg.href));
+          else await this.openFile(msg.href);
+        }
+        break;
+      case 'copyText':
+        await vscode.env.clipboard.writeText(String(msg.text || ''));
+        break;
+    }
   }
 
-  async newTask(name?: string, restored?: Partial<PersistedTask>) {
-    const folder = restored?.cwd || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
-    const config = vscode.workspace.getConfiguration('piCode');
-    const piCommand = config.get<string>('piCommand') || 'pi';
-    const defaultModel = restored?.model || config.get<string>('defaultModel') || '';
-    const extraArgs = config.get<string[]>('extraArgs') || [];
-    const args = ['--mode', 'rpc', ...extraArgs];
-    if (defaultModel) args.push('--model', defaultModel);
+  /* ------------------------------------------------------------------ tasks */
 
-    const proc = spawn(piCommand, args, { cwd: folder, env: process.env });
-    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const restoredMessages = restored?.messages?.length ? restored.messages : undefined;
+  private config() {
+    return vscode.workspace.getConfiguration('piCode');
+  }
+
+  private workspaceCwd(): string {
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+  }
+
+  async newTask(opts: { name?: string; cwd?: string; sessionFile?: string; model?: string; messages?: UiMessage[] } = {}): Promise<Task> {
+    const cwd = opts.cwd || this.workspaceCwd();
+    const id = nextId('task');
     const task: Task = {
       id,
-      name: name || restored?.name || `Task ${this.tasks.size + 1}`,
-      cwd: folder,
-      proc,
-      buffer: '',
-      streaming: false,
-      model: defaultModel || undefined,
-      sessionFile: restored?.sessionFile,
-      sessionId: restored?.sessionId,
-      messages: restoredMessages || [{ id: `sys-${id}`, role: 'system', text: `Started Pi RPC in ${folder}` }],
+      name: opts.name || `Task ${this.tasks.size + 1}`,
+      cwd,
+      conv: new Conversation(cwd),
+      model: opts.model,
+      sessionFile: opts.sessionFile,
+      widgets: {},
+      alive: false,
+      models: [],
+      levels: [],
+      commands: [],
     };
-    proc.on('error', error => {
-      task.streaming = false;
-      task.messages.push({
-        id: `err-${Date.now()}`,
-        role: 'error',
-        text: `Failed to start Pi: ${error.message}. Check the piCode.piCommand setting.`,
-      });
+    if (opts.messages?.length) task.conv.messages = opts.messages;
+    this.tasks.set(id, task);
+    this.activeTaskId = id;
+    this.postState();
+    await this.spawn(task, { model: opts.model, sessionFile: opts.sessionFile, fresh: !opts.sessionFile && !opts.messages });
+    return task;
+  }
+
+  private async spawn(task: Task, opts: { model?: string; sessionFile?: string; fresh: boolean }): Promise<void> {
+    const cfg = this.config();
+    const env = augmentedEnv();
+    const command = resolvePiCommand(cfg.get<string>('piCommand'), env);
+    const model = opts.model || cfg.get<string>('defaultModel') || '';
+    const args = ['--mode', 'rpc', ...(cfg.get<string[]>('extraArgs') || [])];
+    if (model) args.push('--model', model);
+
+    let proc: PiProcess;
+    try {
+      proc = new PiProcess({ command, args, cwd: task.cwd, env });
+    } catch (err: any) {
+      task.alive = false;
+      task.conv.system(`Failed to start pi (${command}): ${err.message}. Set piCode.piCommand to the full path.`, 'error');
+      this.postState();
+      return;
+    }
+    task.proc = proc;
+    task.alive = true;
+    task.lastError = undefined;
+    proc.on('event', (e: RpcEvent) => this.onEvent(task, e));
+    proc.on('stderr', (text: string) => {
+      this.output.appendLine(`[${task.name}] ${text.trimEnd()}`);
+      if (/error|exception|failed/i.test(text) && !/warn/i.test(text)) task.conv.system(text.trim(), 'warning');
+      this.scheduleRender();
+    });
+    proc.on('error', (err: Error) => {
+      task.alive = false;
+      task.lastError = err.message;
+      task.conv.system(`Failed to start pi (${command}): ${err.message}. Set piCode.piCommand to the full path of the pi executable.`, 'error');
+      this.postState();
+    });
+    proc.on('exit', (code: number | null) => {
+      if (task.proc !== proc) return;
+      task.alive = false;
+      task.conv.markAborted();
+      task.conv.system(`pi exited (${code ?? 'signal'})`, code ? 'error' : 'system');
       this.postState();
     });
 
-    const rpc = new PiRpcTask(task, (t, e) => this.handleEvent(t, e), (t, code) => this.handleExit(t, code));
-    this.tasks.set(id, rpc);
-    this.activeTaskId = id;
-    rpc.send({ type: 'get_available_models' });
-    if (restored?.sessionFile) {
-      rpc.send({ type: 'switch_session', sessionPath: restored.sessionFile });
+    try {
+      if (opts.sessionFile && fs.existsSync(opts.sessionFile)) {
+        const r = await proc.request({ type: 'switch_session', sessionPath: opts.sessionFile });
+        if (r.success && !r.data?.cancelled) {
+          const msgs = await proc.request({ type: 'get_messages' });
+          if (msgs.success) task.conv.load(msgs.data?.messages || []);
+        } else {
+          task.conv.system(`Could not reopen session: ${r.error || 'cancelled'}`, 'warning');
+        }
+      } else if (opts.sessionFile) {
+        task.conv.system('Previous session file is gone, started a new one.', 'warning');
+      }
+      await this.refreshState(task);
+      const level = cfg.get<string>('defaultThinkingLevel');
+      if (opts.fresh && level && task.levels.includes(level) && task.thinking !== level) {
+        const r = await proc.request({ type: 'set_thinking_level', level });
+        if (r.success) task.thinking = level;
+      }
+      this.loadTaskInfo(task).catch(err => this.report(err));
+    } catch (err: any) {
+      task.conv.system(`pi did not answer: ${err.message}`, 'error');
     }
-    rpc.send({ type: 'get_state' });
     this.postState();
   }
 
-  private async restoreTasks() {
+  private async refreshState(task: Task): Promise<void> {
+    if (!task.proc?.alive) return;
+    const r = await task.proc.request({ type: 'get_state' });
+    if (!r.success) return;
+    const d = r.data || {};
+    task.sessionFile = d.sessionFile || task.sessionFile;
+    task.sessionId = d.sessionId || task.sessionId;
+    task.sessionName = d.sessionName || undefined;
+    task.thinking = d.thinkingLevel;
+    if (d.model?.id) task.model = `${d.model.provider ? d.model.provider + '/' : ''}${d.model.id}`;
+    if (task.sessionName && task.name.startsWith('Task ')) task.name = task.sessionName;
+    const lv = await task.proc.request({ type: 'get_available_thinking_levels' });
+    if (lv.success) task.levels = lv.data?.levels || [];
+  }
+
+  private async loadTaskInfo(task: Task): Promise<void> {
+    if (!task.proc?.alive) return;
+    const [models, commands] = await Promise.all([task.proc.request({ type: 'get_available_models' }), task.proc.request({ type: 'get_commands' })]);
+    if (models.success) task.models = models.data?.models || [];
+    if (commands.success) task.commands = commands.data?.commands || [];
+    this.postTaskInfo(task);
+  }
+
+  private postTaskInfo(task: Task): void {
+    this.view?.webview.postMessage({ type: 'models', taskId: task.id, models: task.models.map(m => ({ id: m.id, name: m.name, provider: m.provider, reasoning: m.reasoning, input: m.input })) });
+    this.view?.webview.postMessage({ type: 'thinkingLevels', taskId: task.id, levels: task.levels });
+    this.view?.webview.postMessage({ type: 'commands', taskId: task.id, commands: task.commands.map(c => ({ name: c.name, description: c.description, source: c.source })) });
+  }
+
+  closeTask(taskId: string): void {
+    const task = this.tasks.get(taskId);
+    if (!task) return;
+    task.proc?.kill();
+    this.tasks.delete(taskId);
+    if (this.activeTaskId === taskId) this.activeTaskId = [...this.tasks.keys()].pop();
+    this.postState();
+  }
+
+  async restartActive(): Promise<void> {
+    const task = this.activeTask();
+    if (!task) return;
+    task.proc?.kill();
+    task.proc = undefined;
+    task.conv.markAborted();
+    task.conv.system('Restarting pi…');
+    this.postState();
+    await this.spawn(task, { model: task.model, sessionFile: task.sessionFile, fresh: false });
+  }
+
+  private async restoreTasks(): Promise<void> {
+    if (!this.config().get<boolean>('restoreTasks', true)) return;
     const saved = this.context.workspaceState.get<PersistedTask[]>(TASKS_STATE_KEY, []);
     if (!saved.length) return;
-
     const activeIndex = this.context.workspaceState.get<number>(ACTIVE_TASK_STATE_KEY, 0);
     for (const item of saved.slice(0, 8)) {
-      await this.newTask(item.name, item);
+      await this.newTask({ name: item.name, cwd: item.cwd, sessionFile: item.sessionFile, model: item.model, messages: item.sessionFile ? undefined : item.messages });
     }
     const ids = [...this.tasks.keys()];
     this.activeTaskId = ids[Math.min(activeIndex, ids.length - 1)] || ids[0];
-    this.postState();
   }
 
-  private persistTasks() {
-    const tasks = [...this.tasks.values()].map(r => ({
-      name: r.task.name,
-      cwd: r.task.cwd,
-      model: r.task.model,
-      sessionFile: r.task.sessionFile,
-      sessionId: r.task.sessionId,
-      messages: r.task.messages.slice(-200),
+  private persistTasks(): void {
+    const tasks: PersistedTask[] = [...this.tasks.values()].map(t => ({
+      name: t.name,
+      cwd: t.cwd,
+      model: t.model,
+      sessionFile: t.sessionFile,
+      sessionId: t.sessionId,
+      messages: t.sessionFile ? undefined : t.conv.messages.slice(-100),
     }));
-    const activeIndex = [...this.tasks.keys()].findIndex(id => id === this.activeTaskId);
+    const activeIndex = [...this.tasks.keys()].indexOf(this.activeTaskId || '');
     void this.context.workspaceState.update(TASKS_STATE_KEY, tasks);
     void this.context.workspaceState.update(ACTIVE_TASK_STATE_KEY, Math.max(activeIndex, 0));
   }
 
-  stopActive() {
-    const rpc = this.activeRpc();
-    rpc?.send({ type: 'abort' });
-    const task = this.activeTask();
-    if (task) {
-      task.streaming = false;
-      task.messages.push({ id: `sys-${Date.now()}`, role: 'system', text: 'Abort sent' });
+  /* ------------------------------------------------------------------ events */
+
+  private onEvent(task: Task, event: RpcEvent): void {
+    if (event.type === 'extension_ui_request') {
+      this.handleExtensionUi(task, event).catch(err => this.report(err));
+      return;
+    }
+    if (event.type === 'bash_execution_update') {
+      if (task.currentBashId && event.id === task.bashReqId) task.conv.appendBash(task.currentBashId, event.delta || '');
+      this.scheduleRender();
+      return;
+    }
+    const wasStreaming = task.conv.streaming;
+    const changed = task.conv.apply(event);
+    if (event.type === 'agent_settled' || (wasStreaming && !task.conv.streaming)) {
+      this.afterRun(task).catch(err => this.report(err));
+    }
+    if (event.type === 'message_end' && event.message?.role === 'assistant' && event.message.stopReason === 'error') {
+      task.lastError = event.message.errorMessage;
+    }
+    if (changed) this.scheduleRender();
+  }
+
+  private async afterRun(task: Task): Promise<void> {
+    if (!task.proc?.alive) return;
+    const [stats] = await Promise.all([task.proc.request({ type: 'get_session_stats' }), this.refreshState(task)]);
+    if (stats.success) task.stats = stats.data;
+    const firstUser = task.conv.messages.find(m => m.role === 'user');
+    if (firstUser && firstUser.role === 'user' && task.name.startsWith('Task ') && !task.sessionName) {
+      task.name = firstUser.text.replace(/\s+/g, ' ').trim().slice(0, 40) || task.name;
     }
     this.postState();
   }
 
-  async renameActive() {
+  private async handleExtensionUi(task: Task, req: RpcEvent): Promise<void> {
+    const proc = task.proc;
+    if (!proc) return;
+    const title = req.title || 'pi';
+    switch (req.method) {
+      case 'select': {
+        const value = await vscode.window.showQuickPick((req.options || []).map(String), { title, placeHolder: req.message || title, ignoreFocusOut: true });
+        proc.respondUi(req.id, value === undefined ? { cancelled: true } : { value });
+        break;
+      }
+      case 'confirm': {
+        const answer = await vscode.window.showWarningMessage(title, { modal: true, detail: req.message }, 'Yes', 'No');
+        proc.respondUi(req.id, answer === undefined ? { cancelled: true } : { confirmed: answer === 'Yes' });
+        break;
+      }
+      case 'input': {
+        const value = await vscode.window.showInputBox({ title, prompt: req.message, placeHolder: req.placeholder, ignoreFocusOut: true });
+        proc.respondUi(req.id, value === undefined ? { cancelled: true } : { value });
+        break;
+      }
+      case 'editor': {
+        const value = await this.editInDocument(title, req.prefill || '');
+        proc.respondUi(req.id, value === undefined ? { cancelled: true } : { value });
+        break;
+      }
+      case 'notify': {
+        const text = String(req.message || '');
+        if (req.notifyType === 'error') vscode.window.showErrorMessage(text);
+        else if (req.notifyType === 'warning') vscode.window.showWarningMessage(text);
+        else vscode.window.showInformationMessage(text);
+        break;
+      }
+      case 'setStatus': {
+        if (req.statusText) {
+          this.status.text = `$(hubot) ${req.statusText}`;
+          this.status.show();
+        } else {
+          this.status.hide();
+        }
+        break;
+      }
+      case 'setWidget': {
+        if (Array.isArray(req.widgetLines) && req.widgetLines.length) task.widgets[req.widgetKey || 'default'] = req.widgetLines.map(String);
+        else delete task.widgets[req.widgetKey || 'default'];
+        this.scheduleRender();
+        break;
+      }
+      case 'set_editor_text':
+        this.view?.webview.postMessage({ type: 'setEditorText', text: req.text || '' });
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Multi-line editor request: open an untitled document and take its content when the user closes it. */
+  private async editInDocument(title: string, prefill: string): Promise<string | undefined> {
+    const doc = await vscode.workspace.openTextDocument({ content: prefill, language: 'markdown' });
+    const editor = await vscode.window.showTextDocument(doc, { preview: false });
+    vscode.window.setStatusBarMessage(`Pi: ${title}. Close the editor tab to submit, or use "Pi Code: Submit editor" from the notification.`, 15000);
+    const choice = await vscode.window.showInformationMessage(`pi asks: ${title}. Edit the opened document, then choose:`, 'Submit', 'Cancel');
+    const text = editor.document.getText();
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor').then(undefined, () => undefined);
+    return choice === 'Submit' ? text : undefined;
+  }
+
+  /* ------------------------------------------------------------------ prompting */
+
+  private async send(mode: 'prompt' | 'steer' | 'followUp', text: string, images: UiImage[], context: ContextChip[]): Promise<void> {
     const task = this.activeTask();
-    const rpc = this.activeRpc();
     if (!task) return;
-    const name = await vscode.window.showInputBox({
-      title: 'Rename Pi Code task',
-      value: task.name,
-      prompt: 'Task name shown in the Pi Code sidebar',
-    });
-    if (!name?.trim()) return;
-    task.name = name.trim();
-    rpc?.send({ type: 'set_session_name', name: task.name });
+    if (!task.proc?.alive) {
+      vscode.window.showWarningMessage('pi is not running for this task. Restart it from the ⋯ menu.');
+      return;
+    }
+    if (text.startsWith('!') && mode === 'prompt' && !task.conv.streaming) {
+      await this.runBash(task, text.slice(1).trim());
+      return;
+    }
+    const message = this.buildMessage(text, context);
+    task.conv.addUser(message, images);
+    if (mode === 'prompt' && task.conv.streaming) mode = 'steer';
+    this.postState();
+    let response: RpcResponse;
+    if (mode === 'prompt') {
+      task.conv.streaming = true;
+      response = await task.proc.request({ type: 'prompt', message, images: images.length ? images.map(i => ({ type: 'image', data: i.data, mimeType: i.mimeType })) : undefined });
+    } else {
+      response = await task.proc.request({ type: mode === 'steer' ? 'steer' : 'follow_up', message, images: images.length ? images.map(i => ({ type: 'image', data: i.data, mimeType: i.mimeType })) : undefined });
+    }
+    if (!response.success) {
+      task.conv.streaming = false;
+      task.conv.system(response.error || 'pi rejected the prompt', 'error');
+      this.postState();
+    }
+  }
+
+  private buildMessage(text: string, context: ContextChip[]): string {
+    const parts = [text.trim()];
+    const chips = [...context];
+    const cfg = this.config();
+    const maxBytes = (cfg.get<number>('contextFileMaxKb') || 96) * 1024;
+    // @path mentions typed by hand resolve to files inside the workspace.
+    const cwd = this.activeTask()?.cwd || this.workspaceCwd();
+    for (const m of text.matchAll(/(?:^|\s)@([^\s@]+)/g)) {
+      const rel = m[1].replace(/[),.;:]+$/, '');
+      const abs = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+      if (chips.some(c => c.path === abs)) continue;
+      try {
+        const st = fs.statSync(abs);
+        if (!st.isFile()) continue;
+        if (st.size > maxBytes) {
+          chips.push({ kind: 'file', path: abs, label: rel, text: `[file too large to inline: ${st.size} bytes, read it with the read tool]` });
+          continue;
+        }
+        chips.push({ kind: 'file', path: abs, label: rel, text: fs.readFileSync(abs, 'utf8') });
+      } catch {
+        /* not a file, leave the mention as plain text */
+      }
+    }
+    for (const c of chips) {
+      const rel = path.isAbsolute(c.path) && c.path.startsWith(cwd) ? path.relative(cwd, c.path) : c.path;
+      const where = c.kind === 'selection' && c.startLine ? `${rel}:${c.startLine}${c.endLine && c.endLine !== c.startLine ? `-${c.endLine}` : ''}` : rel;
+      const fence = c.text.includes('```') ? '````' : '```';
+      parts.push(`${c.kind === 'selection' ? 'Selected code from' : 'File'} ${where}:\n${fence}${c.language || ''}\n${c.text.replace(/\n$/, '')}\n${fence}`);
+    }
+    return parts.filter(Boolean).join('\n\n');
+  }
+
+  private async runBash(task: Task, command: string): Promise<void> {
+    if (!command || !task.proc) return;
+    const id = task.conv.addBash(command);
+    task.currentBashId = id;
+    task.bashReqId = `bash-${id}`;
+    this.postState();
+    const r = await task.proc.request({ id: task.bashReqId, type: 'bash', command });
+    task.currentBashId = undefined;
+    if (r.success) {
+      const d = r.data || {};
+      task.conv.finishBash(id, d.output || '', d.exitCode, d.exitCode !== 0 && d.exitCode != null);
+      if (d.truncated && d.fullOutputPath) task.conv.system(`Output truncated, full log: ${d.fullOutputPath}`);
+    } else {
+      task.conv.finishBash(id, r.error || 'bash failed', null, true);
+    }
     this.postState();
   }
 
-  async copySessionPath() {
+  async stopActive(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    const cleared = await task.proc.request({ type: 'clear_queue' });
+    const texts = cleared.success ? [...(cleared.data?.steering || []), ...(cleared.data?.followUp || [])] : [];
+    if (task.currentBashId) task.proc.send({ type: 'abort_bash' });
+    await task.proc.request({ type: 'abort' });
+    task.proc.send({ type: 'abort_retry' });
+    task.conv.markAborted();
+    task.conv.system('Stopped');
+    if (texts.length) this.view?.webview.postMessage({ type: 'restoreQueued', texts });
+    this.postState();
+  }
+
+  async setModel(modelId: string): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive || !modelId) return;
+    const slash = modelId.indexOf('/');
+    const cmd = slash > 0 ? { type: 'set_model', provider: modelId.slice(0, slash), modelId: modelId.slice(slash + 1) } : { type: 'set_model', modelId };
+    const r = await task.proc.request(cmd);
+    if (r.success) {
+      task.model = r.data?.id ? `${r.data.provider ? r.data.provider + '/' : ''}${r.data.id}` : modelId;
+      await this.refreshState(task);
+      this.postTaskInfo(task);
+    } else {
+      task.conv.system(r.error || 'Could not switch model', 'error');
+    }
+    this.postState();
+  }
+
+  async setThinking(level: string): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive || !level) return;
+    const r = await task.proc.request({ type: 'set_thinking_level', level });
+    if (r.success) task.thinking = level;
+    else task.conv.system(r.error || 'Could not set thinking level', 'error');
+    this.postState();
+  }
+
+  async compactActive(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    const r = await task.proc.request({ type: 'compact' });
+    if (!r.success) task.conv.system(r.error || 'Compaction failed', 'error');
+    await this.afterRun(task);
+  }
+
+  async newSessionInActive(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    if (task.conv.messages.some(m => m.role === 'user')) {
+      const ok = await vscode.window.showWarningMessage('Start a new pi session in this task? The current history stays on disk and can be resumed later.', { modal: true }, 'New session');
+      if (ok !== 'New session') return;
+    }
+    const r = await task.proc.request({ type: 'new_session' });
+    if (!r.success || r.data?.cancelled) {
+      task.conv.system(r.error || 'New session cancelled', 'warning');
+    } else {
+      task.conv = new Conversation(task.cwd);
+      task.stats = undefined;
+      task.sessionName = undefined;
+      task.name = `Task ${[...this.tasks.keys()].indexOf(task.id) + 1}`;
+      await this.refreshState(task);
+    }
+    this.postState();
+  }
+
+  async renameActive(): Promise<void> {
+    const task = this.activeTask();
+    if (!task) return;
+    const name = await vscode.window.showInputBox({ title: 'Rename Pi Code task', value: task.name, prompt: 'Shown in the tab strip and stored as the pi session name' });
+    if (!name?.trim()) return;
+    task.name = name.trim();
+    task.sessionName = task.name;
+    task.proc?.send({ type: 'set_session_name', name: task.name });
+    this.postState();
+  }
+
+  async copySessionPath(): Promise<void> {
     const task = this.activeTask();
     if (!task?.sessionFile) {
       vscode.window.showInformationMessage('Pi session path is not available yet.');
@@ -259,236 +592,232 @@ class PiCodeProvider implements vscode.WebviewViewProvider {
     vscode.window.showInformationMessage('Pi session path copied.');
   }
 
-  exportActiveHtml() {
-    const rpc = this.activeRpc();
-    rpc?.send({ type: 'export_html' });
-  }
-
-  async restartActive() {
-    const current = this.activeTask();
-    const oldName = current?.name;
-    if (current) {
-      this.tasks.get(current.id)?.dispose();
-      this.tasks.delete(current.id);
-    }
-    await this.newTask(oldName || undefined);
-  }
-
-  async prompt(text: string, images: any[] = []) {
+  async exportActiveHtml(): Promise<void> {
     const task = this.activeTask();
-    const rpc = this.activeRpc();
-    if (!task || !rpc || !text.trim()) return;
-    const wasStreaming = task.streaming;
-    task.messages.push({ id: `u-${Date.now()}`, role: 'user', text });
-    task.messages.push({ id: `a-${Date.now()}`, role: 'assistant', text: '', status: 'streaming' });
-    task.streaming = true;
-    rpc.send({
-      type: 'prompt',
-      message: text,
-      images,
-      ...(wasStreaming ? { streamingBehavior: 'followUp' } : {}),
-    });
-    this.postState();
-  }
-
-  setModel(modelId: string) {
-    const rpc = this.activeRpc();
-    const task = this.activeTask();
-    if (!rpc || !task || !modelId) return;
-    const slash = modelId.indexOf('/');
-    if (slash > 0) {
-      rpc.send({ type: 'set_model', provider: modelId.slice(0, slash), modelId: modelId.slice(slash + 1) });
+    if (!task?.proc?.alive) return;
+    const r = await task.proc.request({ type: 'export_html' });
+    if (r.success && r.data?.path) {
+      const open = await vscode.window.showInformationMessage(`Exported to ${r.data.path}`, 'Open');
+      if (open) await vscode.env.openExternal(vscode.Uri.file(r.data.path));
     } else {
-      rpc.send({ type: 'set_model', modelId });
+      task.conv.system(r.error || 'Export failed', 'error');
+      this.postState();
     }
-    task.model = modelId;
-    this.postState();
   }
 
-  async attachImage() {
-    const pick = await vscode.window.showOpenDialog({
-      canSelectFiles: true,
-      canSelectFolders: false,
-      canSelectMany: true,
-      filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
-    });
+  async resumeSession(): Promise<void> {
+    const cwd = this.workspaceCwd();
+    const sessions = listSessions(cwd);
+    if (!sessions.length) {
+      vscode.window.showInformationMessage(`No pi sessions recorded for ${cwd}.`);
+      return;
+    }
+    const open = new Set([...this.tasks.values()].map(t => t.sessionFile));
+    const items = sessions.map(s => ({
+      label: (s.name || s.firstPrompt || path.basename(s.file)).slice(0, 80),
+      description: `${fmtDate(s.modifiedAt)} · ${s.messageCount} msgs${open.has(s.file) ? ' · open' : ''}`,
+      detail: s.name && s.firstPrompt ? s.firstPrompt : undefined,
+      session: s as SessionInfo,
+    }));
+    const pick = await vscode.window.showQuickPick(items, { title: 'Resume pi session', placeHolder: 'Sessions for this workspace, newest first', matchOnDescription: true, matchOnDetail: true });
+    if (!pick) return;
+    const existing = [...this.tasks.values()].find(t => t.sessionFile === pick.session.file);
+    if (existing) {
+      this.activeTaskId = existing.id;
+      this.postState();
+      return;
+    }
+    await this.newTask({ name: pick.label, cwd, sessionFile: pick.session.file });
+  }
+
+  /* ------------------------------------------------------------------ editor integration */
+
+  async addSelection(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+      vscode.window.showInformationMessage('Open a file and select code first.');
+      return;
+    }
+    const sel = editor.selection;
+    const whole = sel.isEmpty;
+    const range = whole ? new vscode.Range(0, 0, editor.document.lineCount, 0) : new vscode.Range(sel.start.line, 0, sel.end.line, editor.document.lineAt(sel.end.line).text.length);
+    const text = editor.document.getText(range);
+    const file = editor.document.uri.fsPath;
+    const rel = vscode.workspace.asRelativePath(editor.document.uri, false);
+    const chip: ContextChip = {
+      kind: whole ? 'file' : 'selection',
+      path: file,
+      label: whole ? rel : `${rel}:${range.start.line + 1}-${range.end.line + 1}`,
+      startLine: whole ? undefined : range.start.line + 1,
+      endLine: whole ? undefined : range.end.line + 1,
+      text,
+      language: editor.document.languageId,
+    };
+    await this.focus();
+    this.view?.webview.postMessage({ type: 'addContext', chip });
+  }
+
+  async addFile(uri?: vscode.Uri): Promise<void> {
+    const target = uri || vscode.window.activeTextEditor?.document.uri;
+    if (!target) return;
+    const maxBytes = (this.config().get<number>('contextFileMaxKb') || 96) * 1024;
+    let text: string;
+    try {
+      const st = fs.statSync(target.fsPath);
+      text = st.size > maxBytes ? `[file too large to inline: ${st.size} bytes, read it with the read tool]` : fs.readFileSync(target.fsPath, 'utf8');
+    } catch (err: any) {
+      vscode.window.showWarningMessage(`Cannot read ${target.fsPath}: ${err.message}`);
+      return;
+    }
+    await this.focus();
+    this.view?.webview.postMessage({ type: 'addContext', chip: { kind: 'file', path: target.fsPath, label: vscode.workspace.asRelativePath(target, false), text } });
+  }
+
+  private async pickFile(replaceFrom?: number): Promise<void> {
+    const files = await vscode.workspace.findFiles('**/*', '{**/node_modules/**,**/.git/**,**/dist/**,**/tmp/**,**/log/**,**/vendor/bundle/**}', 4000);
+    const items = files
+      .map(f => vscode.workspace.asRelativePath(f, false))
+      .sort()
+      .map(rel => ({ label: rel }));
+    const pick = await vscode.window.showQuickPick(items, { title: 'Mention a file', placeHolder: 'Type to filter workspace files', matchOnDescription: true });
+    await this.focus();
+    if (!pick) return;
+    this.view?.webview.postMessage({ type: 'insertMention', path: pick.label, replaceFrom });
+  }
+
+  private async openFile(p: string, line?: number): Promise<void> {
+    if (!p) return;
+    const cwd = this.activeTask()?.cwd || this.workspaceCwd();
+    const abs = path.isAbsolute(p) ? p : path.join(cwd, p);
+    try {
+      const doc = await vscode.workspace.openTextDocument(abs);
+      const editor = await vscode.window.showTextDocument(doc, { preview: true });
+      if (typeof line === 'number' && line > 0) {
+        const pos = new vscode.Position(line - 1, 0);
+        editor.selection = new vscode.Selection(pos, pos);
+        editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+      }
+    } catch (err: any) {
+      vscode.window.showWarningMessage(`Cannot open ${abs}: ${err.message}`);
+    }
+  }
+
+  /** Diff the working copy against git HEAD through the built-in git extension; falls back to opening the file. */
+  private async openDiff(p: string): Promise<void> {
+    const cwd = this.activeTask()?.cwd || this.workspaceCwd();
+    const abs = path.isAbsolute(p) ? p : path.join(cwd, p);
+    const uri = vscode.Uri.file(abs);
+    const git = vscode.extensions.getExtension<any>('vscode.git');
+    try {
+      const api = git?.isActive ? git.exports.getAPI(1) : (await git?.activate())?.getAPI(1);
+      const repo = api?.repositories?.find((r: any) => abs.startsWith(r.rootUri.fsPath));
+      if (api && repo) {
+        const head = api.toGitUri(uri, 'HEAD');
+        await vscode.commands.executeCommand('vscode.diff', head, uri, `${path.basename(abs)} (HEAD ↔ working tree)`);
+        return;
+      }
+    } catch (err: any) {
+      this.output.appendLine(`diff fallback: ${err.message}`);
+    }
+    await this.openFile(abs);
+  }
+
+  async focus(): Promise<void> {
+    await vscode.commands.executeCommand('piCode.chatView.focus');
+    this.view?.webview.postMessage({ type: 'focusInput' });
+  }
+
+  private async attachImage(): Promise<void> {
+    const pick = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectMany: true, filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp'] } });
     if (!pick?.length) return;
     const images = pick.map(uri => {
-      const data = fs.readFileSync(uri.fsPath).toString('base64');
       const ext = path.extname(uri.fsPath).toLowerCase();
       const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/png';
-      return { type: 'image', data, mimeType, fileName: path.basename(uri.fsPath) };
+      return { fileName: path.basename(uri.fsPath), mimeType, data: fs.readFileSync(uri.fsPath).toString('base64') };
     });
-    this.view?.webview.postMessage({ type: 'attachedImages', images: images.map(i => ({ fileName: i.fileName, mimeType: i.mimeType, data: i.data })) });
+    this.view?.webview.postMessage({ type: 'attachedImages', images });
   }
 
-  private handleEvent(task: Task, event: RpcEvent) {
-    if (event.type === 'message_update') {
-      const delta = event.assistantMessageEvent;
-      if (delta?.type === 'text_delta') {
-        const msg = this.lastAssistant(task);
-        msg.text += delta.delta || '';
-      }
-      if (delta?.type === 'toolcall_start') {
-        task.messages.push({ id: `tool-${Date.now()}`, role: 'tool', text: 'Tool call started', toolName: delta.toolCall?.name || 'tool', status: 'running' });
-      }
-    } else if (event.type === 'tool_execution_start') {
-      task.messages.push({ id: event.toolCallId || `tool-${Date.now()}`, role: 'tool', text: JSON.stringify(event.args || {}, null, 2), toolName: event.toolName, status: 'running' });
-    } else if (event.type === 'tool_execution_update') {
-      const msg = task.messages.find(m => m.id === event.toolCallId) || task.messages[task.messages.length - 1];
-      if (msg && msg.role === 'tool') {
-        msg.text = extractToolText(event.partialResult) || msg.text;
-      }
-    } else if (event.type === 'tool_execution_end') {
-      const msg = task.messages.find(m => m.id === event.toolCallId) || task.messages[task.messages.length - 1];
-      if (msg && msg.role === 'tool') {
-        msg.text = extractToolText(event.result) || msg.text;
-        msg.status = event.isError ? 'error' : 'done';
-      }
-    } else if (event.type === 'agent_end') {
-      task.streaming = false;
-      const msg = this.lastAssistant(task);
-      msg.status = 'done';
-      const firstUser = task.messages.find(m => m.role === 'user')?.text;
-      if (firstUser && task.name.startsWith('Task ')) task.name = firstUser.slice(0, 40).replace(/\s+/g, ' ');
-    } else if (event.type === 'response') {
-      if (event.command === 'get_available_models' && event.success) {
-        this.view?.webview.postMessage({ type: 'models', models: event.data?.models || [] });
-      }
-      if (event.command === 'get_state' && event.success) {
-        task.sessionFile = event.data?.sessionFile || task.sessionFile;
-        task.sessionId = event.data?.sessionId || task.sessionId;
-        task.model = event.data?.model?.provider && event.data?.model?.id ? `${event.data.model.provider}/${event.data.model.id}` : task.model;
-      }
-      if (event.command === 'export_html' && event.success) {
-        const exportedPath = event.data?.path;
-        task.messages.push({ id: `sys-${Date.now()}`, role: 'system', text: exportedPath ? `Exported HTML: ${exportedPath}` : 'Exported HTML.' });
-      }
-      if (event.command === 'set_model' && event.success) {
-        task.model = event.data?.provider && event.data?.id ? `${event.data.provider}/${event.data.id}` : task.model;
-      }
-      if (!event.success) {
-        task.messages.push({ id: `err-${Date.now()}`, role: 'error', text: event.error || 'RPC command failed' });
-      }
-    } else if (event.type === 'stderr') {
-      task.messages.push({ id: `err-${Date.now()}`, role: 'error', text: event.text });
-    } else if (event.type === 'client_error') {
-      task.messages.push({ id: `err-${Date.now()}`, role: 'error', text: event.error });
-    }
-    this.postState();
+  /* ------------------------------------------------------------------ state */
+
+  private activeTask(): Task | undefined {
+    return this.activeTaskId ? this.tasks.get(this.activeTaskId) : undefined;
   }
 
-  private handleExit(task: Task, code: number | null) {
-    task.streaming = false;
-    task.messages.push({ id: `sys-${Date.now()}`, role: 'system', text: `Pi exited (${code ?? 'signal'})` });
-    this.postState();
+  private scheduleRender(): void {
+    if (this.renderTimer) return;
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      this.postState();
+    }, 60);
   }
 
-  private lastAssistant(task: Task): UiMessage {
-    let msg = [...task.messages].reverse().find(m => m.role === 'assistant');
-    if (!msg) {
-      msg = { id: `a-${Date.now()}`, role: 'assistant', text: '' };
-      task.messages.push(msg);
-    }
-    return msg;
-  }
-
-  private activeTask() { return this.activeTaskId ? this.tasks.get(this.activeTaskId)?.task : undefined; }
-  private activeRpc() { return this.activeTaskId ? this.tasks.get(this.activeTaskId) : undefined; }
-
-  private postState() {
-    const tasks = [...this.tasks.values()].map(r => ({
-      id: r.task.id,
-      name: r.task.name,
-      cwd: r.task.cwd,
-      streaming: r.task.streaming,
-      model: r.task.model,
-      sessionFile: r.task.sessionFile,
-      sessionId: r.task.sessionId,
-      messages: r.task.messages,
+  private postState(): void {
+    const cfg = this.config();
+    const tasks = [...this.tasks.values()].map(t => ({
+      id: t.id,
+      name: t.name,
+      cwd: t.cwd,
+      alive: t.alive,
+      streaming: t.conv.streaming,
+      model: t.model,
+      thinking: t.thinking,
+      sessionFile: t.sessionFile,
+      sessionId: t.sessionId,
+      sessionName: t.sessionName,
+      stats: t.stats,
+      widgets: t.widgets,
+      lastError: t.lastError,
+      messages: t.conv.messages,
+      changedFiles: t.conv.changedFiles,
+      queue: t.conv.queue,
     }));
     this.persistTasks();
-    this.view?.webview.postMessage({ type: 'state', activeTaskId: this.activeTaskId, tasks });
+    const active = this.activeTask();
+    if (active?.conv.streaming) {
+      this.status.text = `$(sync~spin) pi: ${active.name}`;
+      this.status.show();
+    } else if (this.status.text.startsWith('$(sync~spin)')) {
+      this.status.hide();
+    }
+    this.view?.webview.postMessage({
+      type: 'state',
+      activeTaskId: this.activeTaskId,
+      tasks,
+      settings: { sendOnEnter: cfg.get<boolean>('sendOnEnter', true), showThinking: cfg.get<boolean>('showThinking', true) },
+    });
   }
 
-  private html(webview: vscode.Webview): string {
-    const nonce = Math.random().toString(36).slice(2);
-    return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<style>
-  :root{--bg:var(--vscode-editor-background);--fg:var(--vscode-editor-foreground);--muted:var(--vscode-descriptionForeground);--border:color-mix(in srgb,var(--vscode-panel-border) 75%,transparent);--accent:var(--vscode-button-background);--accentFg:var(--vscode-button-foreground);--input:var(--vscode-input-background);--card:color-mix(in srgb,var(--vscode-editorWidget-background) 88%,transparent);--soft:color-mix(in srgb,var(--vscode-button-background) 10%,transparent);--shadow:rgba(0,0,0,.18)}
-  *{box-sizing:border-box} body{margin:0;background:linear-gradient(135deg,color-mix(in srgb,var(--bg) 94%,var(--accent)),var(--bg));color:var(--fg);font-family:var(--vscode-font-family);font-size:13px;height:100vh;display:flex;overflow:hidden}
-  .tasks{width:230px;border-right:1px solid var(--border);display:flex;flex-direction:column;min-width:180px;background:color-mix(in srgb,var(--bg) 92%,black)}
-  .task{margin:6px 8px 0;padding:10px 11px;border:1px solid transparent;border-radius:10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .12s,border-color .12s,transform .12s}
-  .task:hover{background:var(--soft);border-color:var(--border)} .task.active{background:color-mix(in srgb,var(--accent) 20%,transparent);border-color:color-mix(in srgb,var(--accent) 45%,transparent);box-shadow:0 8px 24px var(--shadow)}
-  .task small{display:block;color:var(--muted);overflow:hidden;text-overflow:ellipsis;margin-top:4px}
-  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--muted);box-shadow:0 0 0 3px color-mix(in srgb,var(--muted) 16%,transparent)}.dot.running{background:#75E6A7;box-shadow:0 0 0 3px rgba(117,230,167,.18)}.dot.error{background:var(--vscode-errorForeground);box-shadow:0 0 0 3px color-mix(in srgb,var(--vscode-errorForeground) 20%,transparent)}
-  .main{flex:1;display:flex;flex-direction:column;min-width:0}
-  .toolbar{display:flex;gap:8px;padding:10px;border-bottom:1px solid var(--border);align-items:center;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px)}
-  button{background:var(--accent);color:var(--accentFg);border:0;padding:7px 11px;border-radius:8px;cursor:pointer;font-weight:600;box-shadow:0 4px 14px var(--shadow)} button:hover{filter:brightness(1.08)}
-  button.secondary{background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);box-shadow:none;border:1px solid var(--border)}
-  select{background:var(--input);color:var(--fg);border:1px solid var(--border);padding:7px 9px;border-radius:8px;max-width:320px;outline:none}
-  .messages{flex:1;overflow:auto;padding:18px;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth}
-  .msg{border:1px solid var(--border);border-radius:14px;padding:12px 14px;white-space:pre-wrap;line-height:1.5;background:var(--card);box-shadow:0 8px 28px var(--shadow)}
-  .user{align-self:flex-end;max-width:86%;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 28%,transparent),color-mix(in srgb,var(--accent) 12%,transparent));border-color:color-mix(in srgb,var(--accent) 45%,transparent)}
-  .assistant{align-self:flex-start;max-width:92%}.tool{font-family:var(--vscode-editor-font-family);font-size:12px;color:var(--muted);background:color-mix(in srgb,var(--bg) 78%,black)}
-  .error{border-color:var(--vscode-errorForeground);color:var(--vscode-errorForeground);background:color-mix(in srgb,var(--vscode-errorForeground) 10%,var(--card))}.system{color:var(--muted);box-shadow:none;background:transparent;border-style:dashed}
-  .role{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:6px;font-weight:700}
-  .composer{border-top:1px solid var(--border);padding:12px;display:flex;flex-direction:column;gap:9px;background:color-mix(in srgb,var(--bg) 90%,transparent)}
-  textarea{height:92px;resize:vertical;background:var(--input);color:var(--fg);border:1px solid var(--border);border-radius:12px;padding:12px;font-family:var(--vscode-font-family);outline:none;box-shadow:inset 0 0 0 1px transparent} textarea:focus{border-color:color-mix(in srgb,var(--accent) 60%,var(--border));box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent)}
-  .row{display:flex;gap:8px;align-items:center}.grow{flex:1}.attachments{font-size:12px;color:var(--muted)}
-  .meta{padding:7px 12px;border-bottom:1px solid var(--border);color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:color-mix(in srgb,var(--bg) 94%,transparent)}
-  .thumbs{display:flex;gap:10px;flex-wrap:wrap}.thumb{position:relative;border:1px solid var(--border);border-radius:10px;padding:6px;background:var(--card);box-shadow:0 4px 16px var(--shadow)}.thumb img{display:block;max-width:110px;max-height:82px;border-radius:7px}.thumb button{position:absolute;top:-8px;right:-8px;border-radius:50%;width:22px;height:22px;padding:0;background:var(--vscode-errorForeground);color:white;box-shadow:0 4px 14px var(--shadow)}.drop-hint{border:1px dashed color-mix(in srgb,var(--accent) 40%,var(--border));padding:10px;border-radius:10px;text-align:center;color:var(--muted);background:var(--soft)}
-</style></head>
-<body>
-  <div class="tasks"><div class="toolbar"><button id="newTask">＋ New</button><button class="secondary" id="rename">Rename</button><button class="secondary" id="restart">↻</button></div><div id="tasks"></div></div>
-  <div class="main">
-    <div class="toolbar"><select id="models"><option value="">Model</option></select><button class="secondary" id="stop">Stop</button><button class="secondary" id="copySession">Copy session</button><button class="secondary" id="exportHtml">Export HTML</button><span class="grow"></span><span id="status"></span></div>
-    <div class="meta" id="meta"></div>
-    <div class="messages" id="messages"></div>
-    <div class="composer"><div class="attachments" id="attachments"></div><textarea id="input" placeholder="Ask Pi anything..."></textarea><div class="row"><button id="send">Send</button><button class="secondary" id="attach">Attach image</button><span class="grow"></span><span class="attachments">Ctrl/Cmd+Enter to send</span></div></div>
-  </div>
-<script nonce="${nonce}">
-const vscode=acquireVsCodeApi();let state={tasks:[],activeTaskId:null};let models=[];let pendingImages=[];
-const el=id=>document.getElementById(id);
-vscode.postMessage({type:'ready'});
-window.addEventListener('message',e=>{const m=e.data;if(m.type==='state'){state=m;render();} if(m.type==='models'){models=m.models||[];renderModels();} if(m.type==='attachedImages'){pendingImages=[...pendingImages,...(m.images||[])];renderAttachments();}});
-function render(){renderTasks();renderMessages();renderStatus();renderMeta();}
-function active(){return state.tasks.find(t=>t.id===state.activeTaskId)}
-function renderTasks(){el('tasks').innerHTML=state.tasks.map(t=>{const last=[...(t.messages||[])].reverse().find(m=>m.role==='error');const status=last?'error':(t.streaming?'running':'idle');return '<div class="task '+(t.id===state.activeTaskId?'active':'')+'" data-id="'+t.id+'">'+esc(t.name)+'<small><span class="dot '+status+'"></span>'+status+(t.model?' · '+esc(t.model):'')+'</small></div>'}).join('');document.querySelectorAll('.task').forEach(n=>n.onclick=()=>vscode.postMessage({type:'switchTask',taskId:n.dataset.id}));}
-function renderMessages(){const t=active();el('messages').innerHTML=!t?'':t.messages.map(m=>'<div class="msg '+m.role+'"><div class="role">'+esc(m.role)+(m.toolName?' · '+esc(m.toolName):'')+(m.status?' · '+esc(m.status):'')+'</div>'+esc(m.text)+'</div>').join('');el('messages').scrollTop=el('messages').scrollHeight;}
-function renderStatus(){const t=active();el('status').textContent=t?(t.streaming?'Running':'Idle'):'';}
-function renderMeta(){const t=active();el('meta').textContent=t?((t.sessionFile||'session pending')+(t.sessionId?' · '+t.sessionId:'')):'';}
-function renderModels(){el('models').innerHTML='<option value="">Model</option>'+models.map(m=>'<option value="'+escAttr((m.provider?m.provider+'/':'')+m.id)+'">'+esc((m.name||m.id)+' · '+(m.provider||''))+'</option>').join('');}
-function renderAttachments(){if(!pendingImages.length){el('attachments').innerHTML='<div class="drop-hint">Attach, paste or drop images here</div>';return;}el('attachments').innerHTML='<div class="thumbs">'+pendingImages.map((i,idx)=>'<div class="thumb"><button data-remove="'+idx+'">×</button><img src="data:'+escAttr(i.mimeType)+';base64,'+i.data+'" title="'+escAttr(i.fileName||i.mimeType)+'"><div>'+esc(i.fileName||i.mimeType)+'</div></div>').join('')+'</div>';document.querySelectorAll('[data-remove]').forEach(n=>n.onclick=()=>{pendingImages.splice(Number(n.dataset.remove),1);renderAttachments();});}
-function send(){const text=el('input').value.trim();if(!text&&!pendingImages.length)return;vscode.postMessage({type:'send',text:text||'Please analyze the attached image.',images:pendingImages.map(i=>({type:'image',data:i.data,mimeType:i.mimeType}))});el('input').value='';pendingImages=[];renderAttachments();}
-function addFiles(files){[...files].filter(f=>f.type&&f.type.startsWith('image/')).forEach(file=>{const reader=new FileReader();reader.onload=()=>{const data=String(reader.result||'');const base64=data.includes(',')?data.split(',')[1]:data;pendingImages.push({fileName:file.name,mimeType:file.type,data:base64});renderAttachments();};reader.readAsDataURL(file);});}
-el('send').onclick=send;el('newTask').onclick=()=>vscode.postMessage({type:'newTask'});el('stop').onclick=()=>vscode.postMessage({type:'stop'});el('restart').onclick=()=>vscode.postMessage({type:'restart'});el('rename').onclick=()=>vscode.postMessage({type:'renameTask'});el('copySession').onclick=()=>vscode.postMessage({type:'copySessionPath'});el('exportHtml').onclick=()=>vscode.postMessage({type:'exportHtml'});el('attach').onclick=()=>vscode.postMessage({type:'attachImage'});el('models').onchange=e=>vscode.postMessage({type:'setModel',modelId:e.target.value});el('input').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')send();});document.addEventListener('paste',e=>{if(e.clipboardData?.files?.length)addFiles(e.clipboardData.files);});document.addEventListener('dragover',e=>{e.preventDefault();});document.addEventListener('drop',e=>{e.preventDefault();if(e.dataTransfer?.files?.length)addFiles(e.dataTransfer.files);});renderAttachments();
-function esc(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}function escAttr(s){return esc(s).replace(/"/g,'&quot;');}
-</script></body></html>`;
+  private report(err: any): void {
+    this.output.appendLine(`error: ${err?.stack || err}`);
   }
 
-  dispose() {
-    for (const rpc of this.tasks.values()) rpc.dispose();
+  dispose(): void {
+    for (const t of this.tasks.values()) t.proc?.kill();
     this.tasks.clear();
   }
 }
 
-function extractToolText(result: any): string {
-  const content = result?.content;
-  if (Array.isArray(content)) return content.map((c: any) => c.text || JSON.stringify(c)).join('\n');
-  if (typeof result === 'string') return result;
-  if (result) return JSON.stringify(result, null, 2);
-  return '';
+function fmtDate(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export function activate(context: vscode.ExtensionContext): void {
   const provider = new PiCodeProvider(context);
-  context.subscriptions.push(vscode.window.registerWebviewViewProvider('piCode.chatView', provider));
-  context.subscriptions.push(vscode.commands.registerCommand('piCode.newTask', () => provider.newTask()));
-  context.subscriptions.push(vscode.commands.registerCommand('piCode.stopTask', () => provider.stopActive()));
-  context.subscriptions.push(vscode.commands.registerCommand('piCode.restartTask', () => provider.restartActive()));
-  context.subscriptions.push({ dispose: () => provider.dispose() });
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider('piCode.chatView', provider, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.commands.registerCommand('piCode.newTask', () => provider.newTask()),
+    vscode.commands.registerCommand('piCode.stopTask', () => provider.stopActive()),
+    vscode.commands.registerCommand('piCode.restartTask', () => provider.restartActive()),
+    vscode.commands.registerCommand('piCode.addSelection', () => provider.addSelection()),
+    vscode.commands.registerCommand('piCode.addFile', (uri?: vscode.Uri) => provider.addFile(uri)),
+    vscode.commands.registerCommand('piCode.resumeSession', () => provider.resumeSession()),
+    vscode.commands.registerCommand('piCode.newSession', () => provider.newSessionInActive()),
+    vscode.commands.registerCommand('piCode.compact', () => provider.compactActive()),
+    vscode.commands.registerCommand('piCode.focus', () => provider.focus()),
+    provider,
+  );
 }
 
-export function deactivate() {}
+export function deactivate(): void {}
