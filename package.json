@@ -2,7 +2,7 @@
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
   "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -393,7 +393,7 @@
     "watch": "tsc -watch -p ./",
     "smoke": "npm run compile && node scripts/smoke.js",
     "package": "npm run compile && npx @vscode/vsce package --no-dependencies",
-    "install-local": "npm run package && code --install-extension pi-coding-agent-vscode-0.3.0.vsix --force",
+    "install-local": "npm run package && node scripts/install-local.js",
     "check": "npm run compile && node scripts/tiers-check.js && node scripts/webview-check.js && node scripts/context-check.js"
   },
   "devDependencies": {
