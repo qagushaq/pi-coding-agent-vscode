@@ -41,6 +41,7 @@ const ACTIVE_TASK_STATE_KEY = 'piCode.activeTaskId';
 
 export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
+  private panel?: vscode.WebviewPanel;
   private tasks = new Map<string, Task>();
   private activeTaskId?: string;
   private restored = false;
@@ -60,13 +61,47 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
-    view.webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
-    const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-    view.webview.html = renderWebviewHtml(view.webview.cspSource, nonce);
+    this.wire(view.webview);
     view.onDidChangeVisibility(() => {
       if (view.visible) this.postState();
     });
-    view.webview.onDidReceiveMessage(msg => this.onWebviewMessage(msg).catch(err => this.report(err)));
+  }
+
+  /** The sidebar and the editor tab run the same page; whichever exists gets the same messages. */
+  private wire(webview: vscode.Webview): void {
+    webview.options = { enableScripts: true, localResourceRoots: [this.context.extensionUri] };
+    const nonce = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    webview.html = renderWebviewHtml(webview.cspSource, nonce);
+    webview.onDidReceiveMessage(msg => this.onWebviewMessage(msg).catch(err => this.report(err)));
+  }
+
+  private post(message: any): void {
+    this.post(message);
+    this.panel?.webview.postMessage(message);
+  }
+
+  /** Opens the chat as an editor tab, the way Claude's extension can, and keeps it in sync with the sidebar. */
+  openInEditor(): void {
+    if (this.panel) {
+      this.panel.reveal(this.panel.viewColumn, false);
+      return;
+    }
+    const panel = vscode.window.createWebviewPanel('piCode.chatPanel', 'Pi Code', { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false }, {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [this.context.extensionUri],
+    });
+    panel.iconPath = vscode.Uri.joinPath(this.context.extensionUri, 'resources', 'pi-code.svg');
+    this.panel = panel;
+    this.wire(panel.webview);
+    panel.onDidDispose(() => {
+      if (this.panel === panel) this.panel = undefined;
+    });
+    panel.onDidChangeViewState(e => {
+      if (e.webviewPanel.visible) this.postState();
+    });
+    this.postState();
+    for (const t of this.tasks.values()) this.postTaskInfo(t);
   }
 
   private async onWebviewMessage(msg: any): Promise<void> {
@@ -293,13 +328,13 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   private postTaskInfo(task: Task): void {
-    this.view?.webview.postMessage({
+    this.post({
       type: 'modelOptions',
       taskId: task.id,
       families: task.families.map(f => ({ family: f.family, label: familyLabel(f.family), efforts: f.efforts, hasFast: f.hasFast, hasBase: f.hasBase })),
       levels: task.levels,
     });
-    this.view?.webview.postMessage({ type: 'commands', taskId: task.id, commands: task.commands.map(c => ({ name: c.name, description: c.description, source: c.source })) });
+    this.post({ type: 'commands', taskId: task.id, commands: task.commands.map(c => ({ name: c.name, description: c.description, source: c.source })) });
   }
 
   /** Keep `tier` in sync with whatever model id the session actually runs. */
@@ -438,7 +473,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
         break;
       }
       case 'set_editor_text':
-        this.view?.webview.postMessage({ type: 'setEditorText', text: req.text || '' });
+        this.post({ type: 'setEditorText', text: req.text || '' });
         break;
       default:
         break;
@@ -583,7 +618,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     task.proc.send({ type: 'abort_retry' });
     task.conv.markAborted();
     task.conv.system('Stopped');
-    if (texts.length) this.view?.webview.postMessage({ type: 'restoreQueued', texts });
+    if (texts.length) this.post({ type: 'restoreQueued', texts });
     this.postState();
   }
 
@@ -744,7 +779,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     const msgs = await task.proc.request({ type: 'get_messages' });
     if (msgs.success) task.conv.load(msgs.data?.messages || []);
     task.conv.system('Rewound to before that message. The prompt is back in the composer; the files pi already changed are untouched.', 'system');
-    this.view?.webview.postMessage({ type: 'setEditorText', text: typeof r.data?.text === 'string' ? r.data.text : target.text });
+    this.post({ type: 'setEditorText', text: typeof r.data?.text === 'string' ? r.data.text : target.text });
     await this.afterRun(task);
     this.focus();
   }
@@ -889,7 +924,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       language: editor.document.languageId,
     };
     await this.focus();
-    this.view?.webview.postMessage({ type: 'addContext', chip });
+    this.post({ type: 'addContext', chip });
   }
 
   async addFile(uri?: vscode.Uri): Promise<void> {
@@ -905,7 +940,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       return;
     }
     await this.focus();
-    this.view?.webview.postMessage({ type: 'addContext', chip: { kind: 'file', path: target.fsPath, label: vscode.workspace.asRelativePath(target, false), text } });
+    this.post({ type: 'addContext', chip: { kind: 'file', path: target.fsPath, label: vscode.workspace.asRelativePath(target, false), text } });
   }
 
   private async pickFile(replaceFrom?: number): Promise<void> {
@@ -917,7 +952,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     const pick = await vscode.window.showQuickPick(items, { title: 'Mention a file', placeHolder: 'Type to filter workspace files', matchOnDescription: true });
     await this.focus();
     if (!pick) return;
-    this.view?.webview.postMessage({ type: 'insertMention', path: pick.label, replaceFrom });
+    this.post({ type: 'insertMention', path: pick.label, replaceFrom });
   }
 
   private async openFile(p: string, line?: number): Promise<void> {
@@ -958,8 +993,11 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   async focus(): Promise<void> {
-    await vscode.commands.executeCommand('piCode.chatView.focus');
-    this.view?.webview.postMessage({ type: 'focusInput' });
+    // Whoever the user is actually looking at wins: an open editor tab should not yank the sidebar out.
+    if (this.panel?.visible) this.panel.reveal(this.panel.viewColumn, false);
+    else if (this.panel && !this.view) this.panel.reveal(this.panel.viewColumn, false);
+    else await vscode.commands.executeCommand('piCode.chatView.focus');
+    this.post({ type: 'focusInput' });
   }
 
   private async attachImage(): Promise<void> {
@@ -970,7 +1008,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/png';
       return { fileName: path.basename(uri.fsPath), mimeType, data: fs.readFileSync(uri.fsPath).toString('base64') };
     });
-    this.view?.webview.postMessage({ type: 'attachedImages', images });
+    this.post({ type: 'attachedImages', images });
   }
 
   /* ------------------------------------------------------------------ state */
@@ -1017,7 +1055,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     } else if (this.status.text.startsWith('$(sync~spin)')) {
       this.status.hide();
     }
-    this.view?.webview.postMessage({
+    this.post({
       type: 'state',
       activeTaskId: this.activeTaskId,
       tasks,
@@ -1030,6 +1068,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   dispose(): void {
+    this.panel?.dispose();
     for (const t of this.tasks.values()) t.proc?.kill();
     this.tasks.clear();
   }
@@ -1075,6 +1114,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.newSession', () => provider.newSessionInActive()),
     vscode.commands.registerCommand('piCode.compact', () => provider.compactActive()),
     vscode.commands.registerCommand('piCode.rewind', () => provider.rewind()),
+    vscode.commands.registerCommand('piCode.openInEditor', () => provider.openInEditor()),
     vscode.commands.registerCommand('piCode.focus', () => provider.focus()),
     vscode.commands.registerCommand('piCode.cycleEffort', () => provider.cycleEffort()),
     vscode.commands.registerCommand('piCode.pickModel', () => provider.pickModel()),

@@ -92,6 +92,12 @@
         "category": "Pi Code"
       },
       {
+        "command": "piCode.openInEditor",
+        "title": "Open Chat in Editor Tab",
+        "category": "Pi Code",
+        "icon": "$(link-external)"
+      },
+      {
         "command": "piCode.openSession",
         "title": "Open Session",
         "category": "Pi Code",
@@ -200,6 +206,11 @@
           "command": "piCode.refreshSessions",
           "when": "view == piCode.sessionsView",
           "group": "navigation@5"
+        },
+        {
+          "command": "piCode.openInEditor",
+          "when": "view == piCode.chatView",
+          "group": "navigation@9"
         }
       ],
       "editor/context": [
