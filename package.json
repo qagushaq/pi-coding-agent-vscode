@@ -2,7 +2,7 @@
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
   "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -180,6 +180,18 @@
         "title": "Pi Code: Branch Session",
         "category": "Pi Code",
         "icon": "$(git-branch)"
+      },
+      {
+        "command": "piCode.openInTerminal",
+        "title": "Pi Code: Continue Session in Terminal",
+        "category": "Pi Code",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "piCode.exportHtml",
+        "title": "Pi Code: Export Conversation to HTML",
+        "category": "Pi Code",
+        "icon": "$(export)"
       }
     ],
     "menus": {
@@ -445,5 +457,13 @@
     "type": "git",
     "url": "git+ssh://git@github.com/qagushaq/pi-coding-agent-vscode.git"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "coding agent",
+    "ai",
+    "chat",
+    "llm",
+    "agent"
+  ]
 }

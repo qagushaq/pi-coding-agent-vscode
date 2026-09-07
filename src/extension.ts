@@ -943,6 +943,40 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     vscode.window.showInformationMessage('Pi session path copied.');
   }
 
+  /**
+   * Hand the current session over to the pi CLI in a VS Code terminal. Two writers on one
+   * session file would fight, so the extension's own pi is stopped first.
+   */
+  async openInTerminal(): Promise<void> {
+    const task = this.activeTask();
+    if (!task) return;
+    if (!task.sessionFile) {
+      vscode.window.showWarningMessage('This task has no session file yet. Send a prompt first.');
+      return;
+    }
+    if (task.proc?.alive) {
+      const go = await vscode.window.showWarningMessage(
+        'Continue this session in a terminal? Pi Code will stop its own pi for this task so the two do not write the same session file.',
+        { modal: true },
+        'Continue in terminal',
+      );
+      if (go !== 'Continue in terminal') return;
+      task.proc.kill();
+      task.proc = undefined;
+      task.alive = false;
+      task.conv.markAborted();
+      task.conv.system('Handed this session to a terminal. Restart the task to take it back.', 'system');
+      this.postState();
+    }
+    const cfg = this.config();
+    const command = resolvePiCommand(cfg.get<string>('piCommand'), augmentedEnv());
+    const args = ['--session', task.sessionFile];
+    if (task.model) args.push('--model', task.model);
+    const terminal = vscode.window.createTerminal({ name: `pi: ${task.name}`, cwd: task.cwd });
+    terminal.sendText([command, ...args].map(a => (/[\s"']/.test(a) ? JSON.stringify(a) : a)).join(' '));
+    terminal.show();
+  }
+
   async exportActiveHtml(): Promise<void> {
     const task = this.activeTask();
     if (!task?.proc?.alive) return;
@@ -1286,6 +1320,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.openInEditor', () => provider.openInEditor()),
     vscode.commands.registerCommand('piCode.modes', () => provider.pickModes()),
     vscode.commands.registerCommand('piCode.branchSession', () => provider.cloneSession()),
+    vscode.commands.registerCommand('piCode.openInTerminal', () => provider.openInTerminal()),
+    vscode.commands.registerCommand('piCode.exportHtml', () => provider.exportActiveHtml()),
     vscode.workspace.onDidChangeConfiguration(e => {
       if (['autoCompaction', 'autoRetry', 'steeringMode', 'followUpMode'].some(k => e.affectsConfiguration(`piCode.${k}`)))
         void provider.applyModesToAll();

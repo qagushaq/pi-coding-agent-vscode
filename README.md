@@ -66,6 +66,10 @@ file, so the branch you left keeps its own entry in the sessions panel and can b
 Session` does the same at the current point without dropping anything - useful for trying a second approach
 while keeping the first.
 
+**Terminal handoff.** `Pi Code: Continue Session in Terminal` opens the pi CLI on the same session file; the
+extension stops its own pi for that task first, because two processes writing one session file would fight.
+Restarting the task takes it back.
+
 **Drag and drop.** Files and folders dragged from the explorer land in the composer: a folder becomes a
 mention, an image becomes an attachment, anything else is attached as a context chip.
 
