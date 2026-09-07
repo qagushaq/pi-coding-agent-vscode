@@ -32,7 +32,13 @@ type Task = {
   commands: any[];
   currentBashId?: string;
   bashReqId?: string;
+  modes?: PiModes;
 };
+
+/** The four pi runtime switches the extension mirrors from settings. */
+type PiModes = { autoCompaction: boolean; autoRetry: boolean; steeringMode: string; followUpMode: string };
+
+const QUEUE_MODES = ['one-at-a-time', 'all'];
 
 type PersistedTask = { name: string; cwd: string; model?: string; sessionFile?: string; sessionId?: string; messages?: UiMessage[] };
 
@@ -307,6 +313,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
         const r = await proc.request({ type: 'set_thinking_level', level });
         if (r.success) task.thinking = level;
       }
+      await this.applyModes(task);
       await this.loadTaskInfo(task);
       const effort = cfg.get<string>('defaultEffort') as Effort | '' | undefined;
       if (opts.fresh && effort) await this.setTier({ effort, fast: cfg.get<boolean>('preferFastVariants', false) });
@@ -330,8 +337,69 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       this.syncTier(task);
     }
     if (task.sessionName && task.name.startsWith('Task ')) task.name = task.sessionName;
+    task.modes = {
+      autoCompaction: d.autoCompactionEnabled !== false,
+      autoRetry: task.modes?.autoRetry ?? this.config().get<boolean>('autoRetry', true),
+      steeringMode: d.steeringMode || 'one-at-a-time',
+      followUpMode: d.followUpMode || 'one-at-a-time',
+    };
     const lv = await task.proc.request({ type: 'get_available_thinking_levels' });
     if (lv.success) task.levels = lv.data?.levels || [];
+  }
+
+  /** pi keeps these switches per session, so push the settings into every live task. */
+  private async applyModes(task: Task): Promise<void> {
+    if (!task.proc?.alive) return;
+    const cfg = this.config();
+    const want: PiModes = {
+      autoCompaction: cfg.get<boolean>('autoCompaction', true),
+      autoRetry: cfg.get<boolean>('autoRetry', true),
+      steeringMode: cfg.get<string>('steeringMode') || 'one-at-a-time',
+      followUpMode: cfg.get<string>('followUpMode') || 'one-at-a-time',
+    };
+    if (!QUEUE_MODES.includes(want.steeringMode)) want.steeringMode = 'one-at-a-time';
+    if (!QUEUE_MODES.includes(want.followUpMode)) want.followUpMode = 'one-at-a-time';
+    const have = task.modes;
+    try {
+      if (!have || have.autoCompaction !== want.autoCompaction)
+        await task.proc.request({ type: 'set_auto_compaction', enabled: want.autoCompaction });
+      if (!have || have.autoRetry !== want.autoRetry)
+        await task.proc.request({ type: 'set_auto_retry', enabled: want.autoRetry });
+      if (!have || have.steeringMode !== want.steeringMode)
+        await task.proc.request({ type: 'set_steering_mode', mode: want.steeringMode });
+      if (!have || have.followUpMode !== want.followUpMode)
+        await task.proc.request({ type: 'set_follow_up_mode', mode: want.followUpMode });
+    } catch (err: any) {
+      this.output.appendLine(`[${task.name}] could not apply modes: ${err.message}`);
+      return;
+    }
+    task.modes = want;
+  }
+
+  /** Re-push the switches to every live task; used when the settings change. */
+  async applyModesToAll(): Promise<void> {
+    for (const task of this.tasks.values()) await this.applyModes(task);
+    this.postState();
+  }
+
+  /** A quick pick over the four switches; picking one writes the setting, which re-applies it. */
+  async pickModes(): Promise<void> {
+    const cfg = this.config();
+    const auto = cfg.get<boolean>('autoCompaction', true);
+    const retry = cfg.get<boolean>('autoRetry', true);
+    const steer = cfg.get<string>('steeringMode') || 'one-at-a-time';
+    const follow = cfg.get<string>('followUpMode') || 'one-at-a-time';
+    const other = (m: string) => (m === 'all' ? 'one-at-a-time' : 'all');
+    const items = [
+      { label: `${auto ? '$(check)' : '$(circle-large-outline)'} Auto compaction`, description: auto ? 'on' : 'off', key: 'autoCompaction', value: !auto },
+      { label: `${retry ? '$(check)' : '$(circle-large-outline)'} Auto retry`, description: retry ? 'on' : 'off', key: 'autoRetry', value: !retry },
+      { label: '$(arrow-right) Steering mode', description: steer, detail: `Switch to '${other(steer)}'`, key: 'steeringMode', value: other(steer) },
+      { label: '$(list-ordered) Follow-up mode', description: follow, detail: `Switch to '${other(follow)}'`, key: 'followUpMode', value: other(follow) },
+    ];
+    const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Toggle a pi mode' });
+    if (!pick) return;
+    await cfg.update(pick.key, pick.value, vscode.ConfigurationTarget.Workspace);
+    await this.applyModesToAll();
   }
 
   private async loadTaskInfo(task: Task): Promise<void> {
@@ -1184,6 +1252,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.compact', () => provider.compactActive()),
     vscode.commands.registerCommand('piCode.rewind', () => provider.rewind()),
     vscode.commands.registerCommand('piCode.openInEditor', () => provider.openInEditor()),
+    vscode.commands.registerCommand('piCode.modes', () => provider.pickModes()),
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (['autoCompaction', 'autoRetry', 'steeringMode', 'followUpMode'].some(k => e.affectsConfiguration(`piCode.${k}`)))
+        void provider.applyModesToAll();
+    }),
     vscode.commands.registerCommand('piCode.focus', () => provider.focus()),
     vscode.commands.registerCommand('piCode.cycleEffort', () => provider.cycleEffort()),
     vscode.commands.registerCommand('piCode.pickModel', () => provider.pickModel()),

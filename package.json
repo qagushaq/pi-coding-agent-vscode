@@ -168,6 +168,12 @@
         "command": "piCode.pickModel",
         "title": "Pick Model and Effort",
         "category": "Pi Code"
+      },
+      {
+        "command": "piCode.modes",
+        "title": "Pi Code: Modes",
+        "category": "Pi Code",
+        "icon": "$(settings-gear)"
       }
     ],
     "menus": {
@@ -384,6 +390,34 @@
           "type": "boolean",
           "default": true,
           "description": "Keep a Pi Code readout in the status bar: idle or working, cost so far, model and context usage in the tooltip."
+        },
+        "piCode.autoCompaction": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let pi compact the conversation on its own when the context window fills up."
+        },
+        "piCode.autoRetry": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let pi retry a request that failed on the provider side."
+        },
+        "piCode.steeringMode": {
+          "type": "string",
+          "enum": [
+            "one-at-a-time",
+            "all"
+          ],
+          "default": "one-at-a-time",
+          "description": "How steering messages sent while pi is working are delivered: one at a time, or all at once."
+        },
+        "piCode.followUpMode": {
+          "type": "string",
+          "enum": [
+            "one-at-a-time",
+            "all"
+          ],
+          "default": "one-at-a-time",
+          "description": "How queued follow-up messages are delivered once pi stops."
         }
       }
     }

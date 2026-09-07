@@ -56,6 +56,14 @@ column next to the code; the sidebar and the tab stay in sync and either one can
 bar keeps a readout of whether pi is idle, working or stopped, with the cost so far and the model, effort and
 context usage in its tooltip; clicking it focuses the chat.
 
+**Modes.** `Pi Code: Modes` toggles the four switches pi keeps for a session: auto compaction, auto retry,
+and whether steering and follow-up messages are delivered one at a time or all at once. The extension pushes
+the settings into every session it starts, so a session opened from the sidebar behaves like your terminal
+pi. pi stores these globally, so a change here is visible to the CLI too.
+
+**Drag and drop.** Files and folders dragged from the explorer land in the composer: a folder becomes a
+mention, an image becomes an attachment, anything else is attached as a context chip.
+
 ## Sessions and reasoning effort
 
 **Sessions view.** The Pi Code container has a second view listing every pi session recorded for the
@@ -103,6 +111,10 @@ Then run `Developer: Reload Window`. The Pi Code icon appears in the activity ba
 | `piCode.autoContext` | `"selection"` | What the active editor adds to every prompt: `off`, `file` (path and line) or `selection` (also inlines the selected text). |
 | `piCode.shareDiagnostics` | `true` | Send the errors and warnings VS Code reports for the active file. |
 | `piCode.statusBar` | `true` | Keep a Pi Code readout in the status bar (state, cost, model and context in the tooltip). |
+| `piCode.autoCompaction` | `true` | Let pi compact the conversation on its own when the context window fills up. |
+| `piCode.autoRetry` | `true` | Let pi retry a request that failed on the provider side. |
+| `piCode.steeringMode` | `one-at-a-time` | How steering messages sent while pi works are delivered. |
+| `piCode.followUpMode` | `one-at-a-time` | How queued follow-up messages are delivered once pi stops. |
 
 When a provider reports no thinking levels, the native selector is hidden and the family/effort controls take over; see the section above.
 
