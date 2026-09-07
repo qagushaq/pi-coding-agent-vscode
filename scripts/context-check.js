@@ -10,6 +10,7 @@ let editor = null;
 let diagnostics = [];
 let config = { autoContext: 'selection', shareDiagnostics: true, contextFileMaxKb: 96 };
 
+const contextKeys = {};
 const vscodeStub = {
   DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
   window: {
@@ -26,7 +27,12 @@ const vscodeStub = {
   ThemeColor: class { constructor(id) { this.id = id; } },
   TreeItem: class {},
   TreeItemCollapsibleState: {},
-  commands: { registerCommand: () => ({ dispose() {} }) },
+  commands: {
+    registerCommand: () => ({ dispose() {} }),
+    executeCommand: (cmd, key, value) => {
+      if (cmd === 'setContext') contextKeys[key] = value;
+    },
+  },
 };
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, ...rest) {
@@ -103,6 +109,20 @@ config.statusBar = false;
 provider.renderStatus();
 ok(status.visible === false, 'status bar can be turned off');
 config.statusBar = true;
+
+// --- palette context keys ---
+task.alive = true;
+task.sessionFile = '/tmp/session.jsonl';
+task.conv.streaming = true;
+provider.renderStatus();
+ok(contextKeys['piCode.streaming'] === true && contextKeys['piCode.alive'] === true, 'a working task sets the streaming and alive keys');
+ok(contextKeys['piCode.hasSession'] === true, 'a task with a session file sets hasSession');
+
+task.conv.streaming = false;
+task.alive = false;
+provider.renderStatus();
+ok(contextKeys['piCode.streaming'] === false && contextKeys['piCode.alive'] === false, 'a stopped task clears the streaming and alive keys');
+ok(contextKeys['piCode.hasTask'] === true, 'a stopped task is still a task');
 
 console.log(failed ? `\nFAILED (${failed})` : '\ncontext check passed');
 process.exit(failed ? 1 : 0);

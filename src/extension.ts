@@ -63,6 +63,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private restored = false;
   private status: vscode.StatusBarItem;
   private extStatus: vscode.StatusBarItem;
+  private contextKeys: Record<string, boolean> = {};
   private renderTimer?: NodeJS.Timeout;
   private output: vscode.OutputChannel;
   tree?: SessionTreeProvider;
@@ -1237,7 +1238,22 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   /** A permanent readout of what pi is doing, the way Claude's extension keeps one in the status bar. */
+  /** Context keys so the palette only offers commands that make sense right now. */
+  private syncContextKeys(): void {
+    const t = this.activeTask();
+    const set = (key: string, value: boolean) => {
+      if (this.contextKeys[key] === value) return;
+      this.contextKeys[key] = value;
+      void vscode.commands.executeCommand('setContext', key, value);
+    };
+    set('piCode.hasTask', !!t);
+    set('piCode.alive', !!t?.alive);
+    set('piCode.streaming', !!t?.conv.streaming);
+    set('piCode.hasSession', !!t?.sessionFile);
+  }
+
   private renderStatus(): void {
+    this.syncContextKeys();
     if (!this.config().get<boolean>('statusBar', true)) {
       this.status.hide();
       return;
