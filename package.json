@@ -174,6 +174,12 @@
         "title": "Pi Code: Modes",
         "category": "Pi Code",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "piCode.branchSession",
+        "title": "Pi Code: Branch Session",
+        "category": "Pi Code",
+        "icon": "$(git-branch)"
       }
     ],
     "menus": {

@@ -61,6 +61,11 @@ and whether steering and follow-up messages are delivered one at a time or all a
 the settings into every session it starts, so a session opened from the sidebar behaves like your terminal
 pi. pi stores these globally, so a change here is visible to the CLI too.
 
+**Branching.** A rewind does not throw the old line of work away: pi's `fork` continues in a fresh session
+file, so the branch you left keeps its own entry in the sessions panel and can be reopened. `Pi Code: Branch
+Session` does the same at the current point without dropping anything - useful for trying a second approach
+while keeping the first.
+
 **Drag and drop.** Files and folders dragged from the explorer land in the composer: a folder becomes a
 mention, an image becomes an attachment, anything else is attached as a context chip.
 

@@ -613,6 +613,34 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
    * the selection (or cursor line) and whatever the language servers are complaining about in that file.
    * Kept deliberately small - the file body is only inlined when the user selected part of it.
    */
+  /** Continue in a copy of this session, leaving the current one on disk untouched. */
+  async cloneSession(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    if (task.conv.streaming) {
+      vscode.window.showWarningMessage('Pi is still working. Stop it before branching.');
+      return;
+    }
+    const r = await task.proc.request({ type: 'clone' });
+    if (!r.success || r.data?.cancelled) {
+      task.conv.system(r.error || 'Branching cancelled', 'warning');
+      this.postState();
+      return;
+    }
+    const previousFile = task.sessionFile;
+    await this.refreshState(task);
+    const msgs = await task.proc.request({ type: 'get_messages' });
+    if (msgs.success) task.conv.load(msgs.data?.messages || []);
+    task.conv.system(
+      previousFile && previousFile !== task.sessionFile
+        ? 'Branched into a copy of this session. The original stays in the sessions panel as it was.'
+        : 'Branched this session.',
+      'system',
+    );
+    await this.afterRun(task);
+    this.focus();
+  }
+
   private editorContext(cwd: string, alreadyAttached: string[]): string {
     const mode = this.config().get<string>('autoContext', 'selection');
     if (mode === 'off') return '';
@@ -862,9 +890,13 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       this.postState();
       return;
     }
+    const previousFile = task.sessionFile;
+    // fork continues in a fresh session file, so the task has to follow it.
+    await this.refreshState(task);
     const msgs = await task.proc.request({ type: 'get_messages' });
     if (msgs.success) task.conv.load(msgs.data?.messages || []);
-    task.conv.system('Rewound to before that message. The prompt is back in the composer; the files pi already changed are untouched.', 'system');
+    const kept = previousFile && previousFile !== task.sessionFile ? ' The branch you left is kept as its own session.' : '';
+    task.conv.system(`Rewound to before that message. The prompt is back in the composer; the files pi already changed are untouched.${kept}`, 'system');
     this.post({ type: 'setEditorText', text: typeof r.data?.text === 'string' ? r.data.text : target.text });
     await this.afterRun(task);
     this.focus();
@@ -1253,6 +1285,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.rewind', () => provider.rewind()),
     vscode.commands.registerCommand('piCode.openInEditor', () => provider.openInEditor()),
     vscode.commands.registerCommand('piCode.modes', () => provider.pickModes()),
+    vscode.commands.registerCommand('piCode.branchSession', () => provider.cloneSession()),
     vscode.workspace.onDidChangeConfiguration(e => {
       if (['autoCompaction', 'autoRetry', 'steeringMode', 'followUpMode'].some(k => e.affectsConfiguration(`piCode.${k}`)))
         void provider.applyModesToAll();
