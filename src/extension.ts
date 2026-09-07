@@ -39,7 +39,7 @@ type PersistedTask = { name: string; cwd: string; model?: string; sessionFile?: 
 const TASKS_STATE_KEY = 'piCode.tasks';
 const ACTIVE_TASK_STATE_KEY = 'piCode.activeTaskId';
 
-class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
   private tasks = new Map<string, Task>();
   private activeTaskId?: string;
@@ -487,6 +487,41 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
     }
   }
 
+  /**
+   * What the editor is showing right now, in the shape Claude Code shares automatically: the active file,
+   * the selection (or cursor line) and whatever the language servers are complaining about in that file.
+   * Kept deliberately small - the file body is only inlined when the user selected part of it.
+   */
+  private editorContext(cwd: string, alreadyAttached: string[]): string {
+    const mode = this.config().get<string>('autoContext', 'selection');
+    if (mode === 'off') return '';
+    const ed = vscode.window.activeTextEditor;
+    if (!ed || ed.document.uri.scheme !== 'file') return '';
+    const abs = ed.document.uri.fsPath;
+    if (alreadyAttached.includes(abs)) return '';
+    const rel = abs.startsWith(cwd) ? path.relative(cwd, abs) : abs;
+    const sel = ed.selection;
+    const lines: string[] = [];
+    if (!sel.isEmpty && mode === 'selection') {
+      const body = ed.document.getText(sel);
+      const max = (this.config().get<number>('contextFileMaxKb') || 96) * 1024;
+      const fence = body.includes('```') ? '````' : '```';
+      lines.push(`The user is looking at ${rel}:${sel.start.line + 1}-${sel.end.line + 1} and has this selected:`);
+      lines.push(`${fence}${ed.document.languageId}\n${(body.length > max ? body.slice(0, max) + '\n[…truncated]' : body).replace(/\n$/, '')}\n${fence}`);
+    } else {
+      lines.push(`The user is looking at ${rel}:${sel.active.line + 1} (no selection).`);
+    }
+    if (this.config().get<boolean>('shareDiagnostics', true)) {
+      const problems = vscode.languages
+        .getDiagnostics(ed.document.uri)
+        .filter(d => d.severity === vscode.DiagnosticSeverity.Error || d.severity === vscode.DiagnosticSeverity.Warning)
+        .slice(0, 20)
+        .map(d => `  ${d.range.start.line + 1}:${d.range.start.character + 1} ${d.severity === vscode.DiagnosticSeverity.Error ? 'error' : 'warning'} ${d.source ? `[${d.source}] ` : ''}${d.message.replace(/\s+/g, ' ').slice(0, 200)}`);
+      if (problems.length) lines.push(`Problems reported in ${rel}:\n${problems.join('\n')}`);
+    }
+    return lines.join('\n');
+  }
+
   private buildMessage(text: string, context: ContextChip[]): string {
     const parts = [text.trim()];
     const chips = [...context];
@@ -516,6 +551,7 @@ class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Disposable {
       const fence = c.text.includes('```') ? '````' : '```';
       parts.push(`${c.kind === 'selection' ? 'Selected code from' : 'File'} ${where}:\n${fence}${c.language || ''}\n${c.text.replace(/\n$/, '')}\n${fence}`);
     }
+    parts.push(this.editorContext(cwd, chips.map(c => c.path)));
     return parts.filter(Boolean).join('\n\n');
   }
 

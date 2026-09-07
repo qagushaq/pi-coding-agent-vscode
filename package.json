@@ -348,6 +348,26 @@
           "type": "boolean",
           "default": false,
           "description": "Prefer the -fast variant of a model when switching family or effort."
+        },
+        "piCode.autoContext": {
+          "type": "string",
+          "enum": [
+            "off",
+            "file",
+            "selection"
+          ],
+          "default": "selection",
+          "enumDescriptions": [
+            "Never mention the active editor.",
+            "Tell pi which file and line the user is on.",
+            "Also inline the selected text when there is a selection."
+          ],
+          "description": "What the active editor contributes to every prompt, without attaching anything by hand."
+        },
+        "piCode.shareDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include errors and warnings that VS Code reports for the active file (up to 20)."
         }
       }
     }
@@ -358,7 +378,7 @@
     "smoke": "npm run compile && node scripts/smoke.js",
     "package": "npm run compile && npx @vscode/vsce package --no-dependencies",
     "install-local": "npm run package && code --install-extension pi-coding-agent-vscode-0.3.0.vsix --force",
-    "check": "npm run compile && node scripts/tiers-check.js && node scripts/webview-check.js"
+    "check": "npm run compile && node scripts/tiers-check.js && node scripts/webview-check.js && node scripts/context-check.js"
   },
   "devDependencies": {
     "@types/node": "^20.19.0",

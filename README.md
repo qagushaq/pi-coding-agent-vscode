@@ -38,6 +38,19 @@ Requires pi ≥ 0.84 (the RPC protocol with `agent_settled`, `get_entries` and t
 - Rename (also sets pi's session name), new session in the same task, compact context, export to HTML, copy session path, restart the pi process.
 - Footer shows session, model, thinking level, context usage, token counts and cost after each run.
 
+## Rewind and editor context
+
+**Rewind.** Every message you sent carries a hover button that rewinds the conversation to just before it,
+and `Pi Code: Rewind Conversation` offers the same points in a quick pick. pi has no undo command: a session
+is a tree of entries, so this uses `fork` to move the leaf back to the parent of that message and puts the
+prompt text back into the composer for editing. Files pi already wrote are not reverted - only the
+conversation moves.
+
+**Editor context.** Like Claude's extension, Pi Code tells the agent what you are looking at without you
+attaching anything: the active file and cursor line, the selected text when there is a selection
+(`piCode.autoContext`), and the errors and warnings VS Code reports for that file
+(`piCode.shareDiagnostics`). A file you attached by hand is never repeated.
+
 ## Sessions and reasoning effort
 
 **Sessions view.** The Pi Code container has a second view listing every pi session recorded for the
@@ -82,6 +95,8 @@ Then run `Developer: Reload Window`. The Pi Code icon appears in the activity ba
 | `piCode.showThinking` | `true` | Render thinking blocks. |
 | `piCode.defaultEffort` | `""` | Reasoning effort for new tasks on gateways that encode it in the model id. |
 | `piCode.preferFastVariants` | `false` | Prefer the `-fast` variant when switching family or effort. |
+| `piCode.autoContext` | `"selection"` | What the active editor adds to every prompt: `off`, `file` (path and line) or `selection` (also inlines the selected text). |
+| `piCode.shareDiagnostics` | `true` | Send the errors and warnings VS Code reports for the active file. |
 
 When a provider reports no thinking levels, the native selector is hidden and the family/effort controls take over; see the section above.
 
@@ -89,7 +104,7 @@ When a provider reports no thinking levels, the native selector is hidden and th
 
 ```bash
 npm run compile          # tsc
-npm run check            # tsc + model-tier parsing + sidebar render in a DOM stub
+npm run check            # tsc + model-tier parsing + sidebar render + editor context, all on stubs
 node scripts/sessions-check.js  # session listing against the real ~/.pi store (read-only)
 npm run smoke            # drives a real `pi --mode rpc` end to end (one small model call)
 npm run package          # builds the .vsix
