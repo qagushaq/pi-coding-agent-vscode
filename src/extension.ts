@@ -36,6 +36,16 @@ type Task = {
 
 type PersistedTask = { name: string; cwd: string; model?: string; sessionFile?: string; sessionId?: string; messages?: UiMessage[] };
 
+const IMAGE_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml',
+};
+
 const TASKS_STATE_KEY = 'piCode.tasks';
 const ACTIVE_TASK_STATE_KEY = 'piCode.activeTaskId';
 
@@ -181,6 +191,9 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
         break;
       case 'pickFile':
         await this.pickFile(typeof msg.replaceFrom === 'number' ? msg.replaceFrom : undefined);
+        break;
+      case 'dropUris':
+        await this.dropUris(Array.isArray(msg.uris) ? msg.uris.map(String) : []);
         break;
       case 'openFile':
         await this.openFile(String(msg.path || ''), msg.line);
@@ -948,6 +961,33 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     this.post({ type: 'addContext', chip: { kind: 'file', path: target.fsPath, label: vscode.workspace.asRelativePath(target, false), text } });
   }
 
+  /** Files dragged in from the explorer or Finder: pictures become image attachments, everything else context. */
+  async dropUris(uris: string[]): Promise<void> {
+    const images: { fileName: string; mimeType: string; data: string }[] = [];
+    for (const raw of uris.slice(0, 20)) {
+      let file: string;
+      try {
+        file = raw.startsWith('file:') ? vscode.Uri.parse(raw).fsPath : raw;
+      } catch {
+        continue;
+      }
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(file);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        this.post({ type: 'insertMention', path: vscode.workspace.asRelativePath(vscode.Uri.file(file), false) });
+        continue;
+      }
+      const mime = IMAGE_TYPES[path.extname(file).toLowerCase()];
+      if (mime) images.push({ fileName: path.basename(file), mimeType: mime, data: fs.readFileSync(file).toString('base64') });
+      else await this.addFile(vscode.Uri.file(file));
+    }
+    if (images.length) this.post({ type: 'attachedImages', images });
+  }
+
   private async pickFile(replaceFrom?: number): Promise<void> {
     const files = await vscode.workspace.findFiles('**/*', '{**/node_modules/**,**/.git/**,**/dist/**,**/tmp/**,**/log/**,**/vendor/bundle/**}', 4000);
     const items = files
@@ -1010,7 +1050,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     if (!pick?.length) return;
     const images = pick.map(uri => {
       const ext = path.extname(uri.fsPath).toLowerCase();
-      const mimeType = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/png';
+      const mimeType = IMAGE_TYPES[ext] || 'image/png';
       return { fileName: path.basename(uri.fsPath), mimeType, data: fs.readFileSync(uri.fsPath).toString('base64') };
     });
     this.post({ type: 'attachedImages', images });

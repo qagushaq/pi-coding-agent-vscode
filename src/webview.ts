@@ -298,8 +298,14 @@ function closePopup(){$('popup').classList.remove('open');popupItems=[];popupMod
 /* ---------- paste / drop images ---------- */
 function addFiles(files){[].forEach.call(files,function(file){if(!file.type||file.type.indexOf('image/')!==0)return;var r=new FileReader();r.onload=function(){var d=String(r.result||'');addChip({kind:'image',label:file.name||file.type,mimeType:file.type,data:d.indexOf(',')>=0?d.split(',')[1]:d});};r.readAsDataURL(file);});}
 document.addEventListener('paste',function(e){if(e.clipboardData&&e.clipboardData.files&&e.clipboardData.files.length)addFiles(e.clipboardData.files);});
-document.addEventListener('dragover',function(e){e.preventDefault();});
-document.addEventListener('drop',function(e){e.preventDefault();if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files.length)addFiles(e.dataTransfer.files);});
+document.addEventListener('dragover',function(e){e.preventDefault();if(e.dataTransfer)e.dataTransfer.dropEffect='copy';});
+document.addEventListener('drop',function(e){e.preventDefault();var dt=e.dataTransfer;if(!dt)return;
+  // Dragging out of the VS Code explorer (or Finder) hands over uris, not File objects with a usable path.
+  var uris=[];
+  try{var rl=dt.getData('resourceurls');if(rl)uris=JSON.parse(rl).map(function(u){return decodeURIComponent(u);});}catch(err){}
+  if(!uris.length){try{var ul=dt.getData('text/uri-list');if(ul)uris=ul.split(/\\r?\\n/).filter(function(l){return l&&l.charAt(0)!=='#';});}catch(err2){}}
+  if(uris.length){vscode.postMessage({type:'dropUris',uris:uris});return;}
+  if(dt.files&&dt.files.length)addFiles(dt.files);});
 
 /* ---------- markdown ---------- */
 var BT='\\x60';
