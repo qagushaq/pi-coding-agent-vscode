@@ -233,6 +233,12 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     return vscode.workspace.getConfiguration('piCode');
   }
 
+  /** `contextFileMaxKb: 0` means "never inline", so a plain `||` fallback would silently ignore it. */
+  private contextByteLimit(): number {
+    const kb = this.config().get<number>('contextFileMaxKb');
+    return (typeof kb === 'number' && kb >= 0 ? kb : 96) * 1024;
+  }
+
   private workspaceCwd(): string {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
   }
@@ -698,7 +704,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     const lines: string[] = [];
     if (!sel.isEmpty && mode === 'selection') {
       const body = ed.document.getText(sel);
-      const max = (this.config().get<number>('contextFileMaxKb') || 96) * 1024;
+      const max = this.contextByteLimit();
       const fence = body.includes('```') ? '````' : '```';
       lines.push(`The user is looking at ${rel}:${sel.start.line + 1}-${sel.end.line + 1} and has this selected:`);
       lines.push(`${fence}${ed.document.languageId}\n${(body.length > max ? body.slice(0, max) + '\n[…truncated]' : body).replace(/\n$/, '')}\n${fence}`);
@@ -720,7 +726,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     const parts = [text.trim()];
     const chips = [...context];
     const cfg = this.config();
-    const maxBytes = (cfg.get<number>('contextFileMaxKb') || 96) * 1024;
+    const maxBytes = this.contextByteLimit();
     // @path mentions typed by hand resolve to files inside the workspace.
     const cwd = this.activeTask()?.cwd || this.workspaceCwd();
     for (const m of text.matchAll(/(?:^|\s)@([^\s@]+)/g)) {
@@ -1124,25 +1130,44 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     this.post({ type: 'addContext', chip });
   }
 
-  async addFile(uri?: vscode.Uri): Promise<void> {
-    const target = uri || vscode.window.activeTextEditor?.document.uri;
-    if (!target) return;
-    const maxBytes = (this.config().get<number>('contextFileMaxKb') || 96) * 1024;
+  /**
+   * Turn a file into a context chip. A file that is too large, or that is not text at all, is named
+   * rather than inlined: pasting a PDF's bytes into the prompt helps nobody and burns the window.
+   */
+  private fileChip(target: vscode.Uri): ContextChip | undefined {
+    const maxBytes = this.contextByteLimit();
+    const label = vscode.workspace.asRelativePath(target, false);
     let text: string;
     try {
       const st = fs.statSync(target.fsPath);
-      text = st.size > maxBytes ? `[file too large to inline: ${st.size} bytes, read it with the read tool]` : fs.readFileSync(target.fsPath, 'utf8');
+      if (st.size > maxBytes) {
+        text = `[file too large to inline: ${st.size} bytes, read it with the read tool]`;
+      } else {
+        const buf = fs.readFileSync(target.fsPath);
+        text = buf.includes(0)
+          ? `[binary file, ${st.size} bytes, not inlined]`
+          : buf.toString('utf8');
+      }
     } catch (err: any) {
       vscode.window.showWarningMessage(`Cannot read ${target.fsPath}: ${err.message}`);
-      return;
+      return undefined;
     }
+    return { kind: 'file', path: target.fsPath, label, text };
+  }
+
+  async addFile(uri?: vscode.Uri): Promise<void> {
+    const target = uri || vscode.window.activeTextEditor?.document.uri;
+    if (!target) return;
+    const chip = this.fileChip(target);
+    if (!chip) return;
     await this.focus();
-    this.post({ type: 'addContext', chip: { kind: 'file', path: target.fsPath, label: vscode.workspace.asRelativePath(target, false), text } });
+    this.post({ type: 'addContext', chip });
   }
 
   /** Files dragged in from the explorer or Finder: pictures become image attachments, everything else context. */
   async dropUris(uris: string[]): Promise<void> {
     const images: { fileName: string; mimeType: string; data: string }[] = [];
+    const chips: (ContextChip | undefined)[] = [];
     for (const raw of uris.slice(0, 20)) {
       let file: string;
       try {
@@ -1162,8 +1187,11 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       }
       const mime = IMAGE_TYPES[path.extname(file).toLowerCase()];
       if (mime) images.push({ fileName: path.basename(file), mimeType: mime, data: fs.readFileSync(file).toString('base64') });
-      else await this.addFile(vscode.Uri.file(file));
+      else chips.push(this.fileChip(vscode.Uri.file(file)));
     }
+    const kept = chips.filter((c): c is ContextChip => !!c);
+    if (kept.length || images.length) await this.focus(); // once, not once per dropped file
+    for (const chip of kept) this.post({ type: 'addContext', chip });
     if (images.length) this.post({ type: 'attachedImages', images });
   }
 

@@ -19,7 +19,11 @@ const vscodeStub = {
     createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
   },
   languages: { getDiagnostics: () => diagnostics },
-  workspace: { getConfiguration: () => ({ get: (k, d) => (config[k] !== undefined ? config[k] : d) }), workspaceFolders: [] },
+  workspace: {
+    getConfiguration: () => ({ get: (k, d) => (config[k] !== undefined ? config[k] : d) }),
+    workspaceFolders: [],
+    asRelativePath: (uri) => (typeof uri === 'string' ? uri : uri.fsPath),
+  },
   StatusBarAlignment: { Left: 1 },
   Uri: { file: p => ({ fsPath: p, scheme: 'file' }) },
   EventEmitter: class { constructor() { this.event = () => {}; } fire() {} },
@@ -109,6 +113,23 @@ config.statusBar = false;
 provider.renderStatus();
 ok(status.visible === false, 'status bar can be turned off');
 config.statusBar = true;
+
+// --- files become chips, but only when they are text ---
+const fsMod = require('fs');
+const os = require('os');
+const pathMod = require('path');
+const tmp = fsMod.mkdtempSync(pathMod.join(os.tmpdir(), 'pi-code-chip-'));
+const textFile = pathMod.join(tmp, 'note.txt');
+fsMod.writeFileSync(textFile, 'hello');
+const binFile = pathMod.join(tmp, 'blob.bin');
+fsMod.writeFileSync(binFile, Buffer.from([0x50, 0x4b, 0x03, 0x00, 0x04, 0xff]));
+ok(provider.fileChip({ fsPath: textFile }).text === 'hello', 'a text file is inlined');
+const binChip = provider.fileChip({ fsPath: binFile });
+ok(/binary file/.test(binChip.text) && !binChip.text.includes('\u0000'), 'a binary file is named, not inlined');
+config.contextFileMaxKb = 0;
+ok(/too large/.test(provider.fileChip({ fsPath: textFile }).text), 'an oversized file is named, not inlined');
+config.contextFileMaxKb = 96;
+fsMod.rmSync(tmp, { recursive: true, force: true });
 
 // --- posts reach both the sidebar and the editor tab ---
 const seen = { view: [], panel: [] };

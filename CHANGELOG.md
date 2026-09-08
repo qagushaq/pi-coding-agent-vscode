@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5
+
+- A binary file attached or dropped into the chat is named and sized instead of having its bytes decoded as
+  UTF-8 into the prompt.
+- Dropping several files focuses the chat once instead of once per file.
+- `piCode.contextFileMaxKb: 0` now means what it says - never inline a file - rather than falling back to 96.
+
 ## 0.5.4
 
 - `npm test` boots a real VS Code, loads the extension into it and checks that it activates, that every
