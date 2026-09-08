@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4
+
+- `npm test` boots a real VS Code, loads the extension into it and checks that it activates, that every
+  contributed command is registered, that the sidebar view renders and that the chat opens as an editor tab.
+  Re-introducing the 0.5.3 recursion makes two of these fail, which is the point: the stub checks could not
+  see it. CI runs the suite under xvfb.
+
 ## 0.5.3
 
 - Fixed a bug that broke the chat in 0.4.0-0.5.2: the helper that fans a message out to the sidebar and the

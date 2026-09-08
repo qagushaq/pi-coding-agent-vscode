@@ -139,8 +139,14 @@ npm run compile          # tsc
 npm run check            # tsc + model-tier parsing + sidebar render + editor context, all on stubs
 node scripts/sessions-check.js  # session listing against the real ~/.pi store (read-only)
 npm run smoke            # drives a real `pi --mode rpc` end to end (one small model call)
+npm test                 # downloads VS Code and drives the extension in a real extension host
 npm run package          # builds the .vsix
+npm run install-local    # builds and installs it into your VS Code
 ```
+
+The stub checks are fast but blind to VS Code itself: the fan-out recursion fixed in 0.5.3 passed every one
+of them and still emptied the chat. `npm test` is the suite that sees that class of breakage, so run it
+before shipping.
 
 Layout: `src/pi-process.ts` (subprocess, JSONL framing, request/response correlation), `src/conversation.ts` (pure reducer from RPC events to UI messages, also rebuilds from `get_messages`), `src/sessions.ts` (session file discovery), `src/webview.ts` (sidebar HTML/CSS/JS with its own markdown renderer), `src/extension.ts` (VS Code glue: tasks, commands, editor context, extension UI bridging, diffs).
 

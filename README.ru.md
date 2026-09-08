@@ -137,6 +137,7 @@ npm run install-local     # компиляция, упаковка, устано
 npm run compile          # tsc
 npm run check            # tsc + разбор имён моделей + рендер панели + контекст редактора, всё на стабах
 node scripts/sessions-check.js  # список сессий на настоящем ~/.pi (только чтение)
+npm test                 # скачивает VS Code и гоняет расширение в настоящем extension host
 npm run smoke            # сквозной прогон через настоящий `pi --mode rpc` (один небольшой вызов модели)
 npm run package          # сборка .vsix
 ```
