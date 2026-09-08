@@ -99,6 +99,13 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
   .popup small{color:inherit;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .footer{display:flex;gap:10px;padding:3px 8px 5px;font-size:11px;color:var(--muted);flex-wrap:wrap;flex:none;border-top:1px solid var(--border)}
   .footer span{white-space:nowrap}
+  .find{display:flex;gap:4px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--border);flex:none}
+  .find input{flex:1;min-width:0;background:var(--vscode-input-background);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px}
+  .find span{font-size:11px;color:var(--muted);white-space:nowrap}
+  .find button{padding:1px 6px}
+  mark.hit{background:var(--vscode-editor-findMatchHighlightBackground,rgba(255,220,0,.35));color:inherit;border-radius:2px}
+  mark.hit.current{background:var(--vscode-editor-findMatchBackground,rgba(255,150,50,.6))}
+  button:focus-visible,select:focus-visible,textarea:focus-visible,input:focus-visible,.tab:focus-visible,[tabindex]:focus-visible{outline:1px solid var(--vscode-focusBorder,#3794ff);outline-offset:1px}
   .empty{color:var(--muted);text-align:center;margin:auto;padding:30px 16px;font-size:12px;line-height:1.7}
   .empty kbd{font-family:var(--mono);background:var(--code);padding:0 4px;border-radius:3px}
 </style></head>
@@ -124,7 +131,14 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
     </div>
   </div>
   <details class="changed" id="changed" style="display:none"><summary id="changedSummary"></summary><div id="changedList"></div></details>
-  <div class="messages" id="messages"></div>
+  <div class="find" id="find" hidden>
+    <input id="findInput" type="search" placeholder="Find in conversation" aria-label="Find in conversation">
+    <span id="findCount" aria-live="polite"></span>
+    <button id="findPrev" title="Previous match (Shift+Enter)" aria-label="Previous match">↑</button>
+    <button id="findNext" title="Next match (Enter)" aria-label="Next match">↓</button>
+    <button id="findClose" title="Close (Escape)" aria-label="Close find">×</button>
+  </div>
+  <div class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite"></div>
   <div class="widget" id="widget" style="display:none"></div>
   <div class="queue" id="queue" style="display:none"></div>
   <div class="composer">
@@ -149,12 +163,16 @@ var vscode=acquireVsCodeApi();
 var state={tasks:[],activeTaskId:null,settings:{sendOnEnter:true,showThinking:true}};
 var perTask={}; // taskId -> {models,levels,commands}
 var chips=[]; var popupItems=[]; var popupIndex=0; var popupMode=null; var openTools={}; var wasAtBottom=true;
+var drafts={};      // taskId -> unsent text, so switching tabs never eats what you typed
+var history={};     // taskId -> prompts sent, newest last
+var histIndex=null; // where Up/Down currently sits in that list
+var histStash='';   // what was in the box before walking back through history
 var $=function(id){return document.getElementById(id)};
 var messagesEl=$('messages'), inputEl=$('input');
 
 vscode.postMessage({type:'ready'});
 window.addEventListener('message',function(e){var m=e.data;
-  if(m.type==='state'){state=m;render();}
+  if(m.type==='state'){swapDraft(m.activeTaskId);state=m;render();}
   else if(m.type==='modelOptions'){perTask[m.taskId]=Object.assign(perTask[m.taskId]||{},{families:m.families||[],levels:m.levels||[]});renderSelectors();}
   else if(m.type==='commands'){perTask[m.taskId]=perTask[m.taskId]||{};perTask[m.taskId].commands=m.commands||[];}
   else if(m.type==='addContext'){addChip(m.chip);}
@@ -186,6 +204,7 @@ function renderMessages(){var t=active();var el=messagesEl;var atBottom=el.scrol
   if(!t){el.innerHTML='<div class="empty">No task. Press ＋ to start one.</div>';return;}
   if(!t.messages.length){el.innerHTML='<div class="empty">Session '+esc((t.sessionId||'').slice(0,8))+' in <b>'+esc(short(t.cwd)||t.cwd)+'</b><br>Type a prompt. <kbd>@</kbd> mentions a file, <kbd>/</kbd> lists commands, <kbd>!cmd</kbd> runs a shell command into context.<br>'+(state.settings.sendOnEnter?'<kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> newline.':'<kbd>Ctrl/Cmd+Enter</kbd> sends.')+'</div>';return;}
   var html='';var ui=0;t.messages.forEach(function(m){if(m.role==='user')m.userIndex=ui++;html+=renderMessage(m,t);});el.innerHTML=html;bindMessageHandlers();
+  if(!$('find').hidden&&$('findInput').value){findHits=[];findAt=-1;runFind();}
   if(atBottom||wasAtBottom)el.scrollTop=el.scrollHeight;wasAtBottom=false;}
 
 function renderMessage(m,t){
@@ -261,6 +280,11 @@ function send(mode){var text=inputEl.value.trim();if(!text&&!chips.length)return
   var images=chips.filter(function(c){return c.kind==='image';}).map(function(c){return {type:'image',data:c.data,mimeType:c.mimeType};});
   var ctx=chips.filter(function(c){return c.kind!=='image';});
   vscode.postMessage({type:'send',mode:mode||'prompt',text:text||(images.length?'Please look at the attached image.':''),images:images,context:ctx});
+  var list=history[t.id]||(history[t.id]=[]);
+  if(text&&list[list.length-1]!==text)list.push(text);
+  if(list.length>100)list.shift();
+  histIndex=null;histStash='';
+  delete drafts[t.id];
   inputEl.value='';chips=[];renderChips();autosize();closePopup();wasAtBottom=true;}
 $('send').onclick=function(){send('prompt');};$('steer').onclick=function(){send('steer');};$('queueBtn').onclick=function(){send('followUp');};
 $('stop').onclick=function(){vscode.postMessage({type:'stop'});};
@@ -277,10 +301,49 @@ inputEl.addEventListener('keydown',function(e){
   if($('popup').classList.contains('open')){if(e.key==='ArrowDown'){popupIndex=Math.min(popupIndex+1,popupItems.length-1);renderPopup();e.preventDefault();return;}if(e.key==='ArrowUp'){popupIndex=Math.max(popupIndex-1,0);renderPopup();e.preventDefault();return;}if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();applyPopup();return;}if(e.key==='Escape'){closePopup();e.preventDefault();return;}}
   var t=active();var streaming=!!(t&&t.streaming);
   if(e.key==='Escape'&&streaming){vscode.postMessage({type:'stop'});return;}
+  if((e.key==='ArrowUp'||e.key==='ArrowDown')&&!e.shiftKey&&!e.altKey&&recallHistory(e))return;
   var sendKey=state.settings.sendOnEnter?(e.key==='Enter'&&!e.shiftKey&&!e.altKey&&!e.isComposing):(e.key==='Enter'&&(e.metaKey||e.ctrlKey));
   if(sendKey){e.preventDefault();send(streaming?'steer':'prompt');}
 });
-inputEl.addEventListener('input',function(){autosize();maybePopup();});
+inputEl.addEventListener('input',function(){
+  var t=active();if(t){if(inputEl.value)drafts[t.id]=inputEl.value;else delete drafts[t.id];}
+  histIndex=null;
+  autosize();maybePopup();});
+/**
+ * Up at the top of the box walks back through prompts already sent in this task, Down walks forward
+ * and hands back whatever was being typed. Anywhere else in a multi-line prompt, the arrows move the
+ * caret as usual.
+ */
+function recallHistory(e){
+  var t=active();if(!t)return false;
+  var list=history[t.id]||[];if(!list.length)return false;
+  var v=inputEl.value;
+  var atTop=inputEl.selectionStart===0&&inputEl.selectionEnd===0;
+  var atEnd=inputEl.selectionStart===v.length&&inputEl.selectionEnd===v.length;
+  if(e.key==='ArrowUp'){
+    if(!atTop&&histIndex===null)return false;
+    if(histIndex===null){histStash=v;histIndex=list.length;}
+    if(histIndex<=0)return true;
+    histIndex--;
+  }else{
+    if(histIndex===null||!atEnd)return false;
+    histIndex++;
+    if(histIndex>=list.length){histIndex=null;setInput(histStash);e.preventDefault();return true;}
+  }
+  setInput(list[histIndex]);
+  e.preventDefault();
+  return true;
+}
+/** Park the unsent text with the task it belongs to and bring the new task's text back. */
+function swapDraft(nextId){
+  var prev=state.activeTaskId;
+  if(prev===nextId||!nextId)return;
+  if(prev){if(inputEl.value)drafts[prev]=inputEl.value;else delete drafts[prev];}
+  histIndex=null;histStash='';
+  inputEl.value=drafts[nextId]||'';
+  autosize();
+}
+function setInput(text){inputEl.value=text||'';inputEl.selectionStart=inputEl.selectionEnd=inputEl.value.length;autosize();}
 function autosize(){inputEl.style.height='auto';inputEl.style.height=Math.min(inputEl.scrollHeight+2,240)+'px';}
 function insertAtCursor(text){var s=inputEl.selectionStart,e=inputEl.selectionEnd;var v=inputEl.value;inputEl.value=v.slice(0,s)+text+v.slice(e);inputEl.selectionStart=inputEl.selectionEnd=s+text.length;autosize();inputEl.focus();}
 
@@ -294,6 +357,78 @@ function renderPopup(){var p=$('popup');if(!popupItems.length){p.classList.remov
   [].forEach.call(p.querySelectorAll('div[data-i]'),function(n){n.onclick=function(){popupIndex=Number(n.dataset.i);applyPopup();};});}
 function applyPopup(){var it=popupItems[popupIndex];if(!it||!popupMode){closePopup();return;}var v=inputEl.value;var end=popupMode.start+popupMode.token.length;inputEl.value=v.slice(0,popupMode.start)+it.insert+v.slice(end);inputEl.selectionStart=inputEl.selectionEnd=popupMode.start+it.insert.length;closePopup();inputEl.focus();autosize();}
 function closePopup(){$('popup').classList.remove('open');popupItems=[];popupMode=null;}
+
+/* ---------- find in conversation ---------- */
+var findHits=[]; var findAt=-1;
+
+function openFind(){
+  var f=$('find');f.hidden=false;
+  var sel=String(window.getSelection?window.getSelection():'').trim();
+  if(sel&&sel.length<200)$('findInput').value=sel;
+  $('findInput').focus();$('findInput').select();
+  runFind();
+}
+function closeFind(){$('find').hidden=true;clearHits();inputEl.focus();}
+
+/** Drop the <mark> wrappers and glue the split text nodes back together. */
+function clearHits(){
+  var marks=messagesEl.querySelectorAll('mark.hit');
+  for(var i=0;i<marks.length;i++){var m=marks[i];var p=m.parentNode;p.replaceChild(document.createTextNode(m.textContent),m);p.normalize();}
+  findHits=[];findAt=-1;$('findCount').textContent='';
+}
+
+function runFind(){
+  clearHits();
+  var q=$('findInput').value;
+  if(!q){return;}
+  var needle=q.toLowerCase();
+  var walker=document.createTreeWalker(messagesEl,NodeFilter.SHOW_TEXT,null);
+  var targets=[];var node;
+  while((node=walker.nextNode())){
+    if(node.nodeValue&&node.nodeValue.toLowerCase().indexOf(needle)>=0&&node.parentNode&&node.parentNode.nodeName!=='SCRIPT')targets.push(node);
+  }
+  for(var i=0;i<targets.length&&findHits.length<500;i++)markNode(targets[i],needle);
+  if(findHits.length){findAt=0;focusHit();}
+  renderFindCount();
+}
+
+function markNode(node,needle){
+  var text=node.nodeValue;var lower=text.toLowerCase();var frag=document.createDocumentFragment();var at=0;var idx;
+  while((idx=lower.indexOf(needle,at))>=0&&findHits.length<500){
+    if(idx>at)frag.appendChild(document.createTextNode(text.slice(at,idx)));
+    var mark=document.createElement('mark');mark.className='hit';mark.textContent=text.slice(idx,idx+needle.length);
+    frag.appendChild(mark);findHits.push(mark);
+    at=idx+needle.length;
+  }
+  if(at<text.length)frag.appendChild(document.createTextNode(text.slice(at)));
+  node.parentNode.replaceChild(frag,node);
+}
+
+function renderFindCount(){
+  var q=$('findInput').value;
+  $('findCount').textContent=!q?'':(findHits.length?(findAt+1)+' of '+findHits.length:'no matches');
+}
+
+function stepFind(delta){
+  if(!findHits.length)return;
+  findHits[findAt]&&findHits[findAt].classList.remove('current');
+  findAt=(findAt+delta+findHits.length)%findHits.length;
+  focusHit();renderFindCount();
+}
+function focusHit(){var m=findHits[findAt];if(!m)return;m.classList.add('current');if(m.scrollIntoView)m.scrollIntoView({block:'center'});}
+
+$('findInput').addEventListener('input',runFind);
+$('findInput').addEventListener('keydown',function(e){
+  if(e.key==='Escape'){e.preventDefault();closeFind();return;}
+  if(e.key==='Enter'){e.preventDefault();stepFind(e.shiftKey?-1:1);}
+});
+$('findNext').onclick=function(){stepFind(1);};
+$('findPrev').onclick=function(){stepFind(-1);};
+$('findClose').onclick=closeFind;
+document.addEventListener('keydown',function(e){
+  if((e.metaKey||e.ctrlKey)&&(e.key==='f'||e.key==='F')){e.preventDefault();openFind();return;}
+  if(e.key==='Escape'&&!$('find').hidden){e.preventDefault();closeFind();}
+});
 
 /* ---------- paste / drop images ---------- */
 function addFiles(files){[].forEach.call(files,function(file){if(!file.type||file.type.indexOf('image/')!==0)return;var r=new FileReader();r.onload=function(){var d=String(r.result||'');addChip({kind:'image',label:file.name||file.type,mimeType:file.type,data:d.indexOf(',')>=0?d.split(',')[1]:d});};r.readAsDataURL(file);});}

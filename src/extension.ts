@@ -40,6 +40,9 @@ type PiModes = { autoCompaction: boolean; autoRetry: boolean; steeringMode: stri
 
 const QUEUE_MODES = ['one-at-a-time', 'all'];
 
+/** How many times in a row a crashed pi is picked back up before the task is left alone. */
+const MAX_AUTO_RESTARTS = 3;
+
 type PersistedTask = { name: string; cwd: string; model?: string; sessionFile?: string; sessionId?: string; messages?: UiMessage[] };
 
 const IMAGE_TYPES: Record<string, string> = {
@@ -65,6 +68,8 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private extStatus: vscode.StatusBarItem;
   private contextKeys: Record<string, boolean> = {};
   private unseen = new Set<string>();
+  private restarts = new Map<string, number>();
+  private restartDelayMs = 2000;
   private renderTimer?: NodeJS.Timeout;
   private output: vscode.OutputChannel;
   tree?: SessionTreeProvider;
@@ -312,12 +317,16 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       task.conv.system(`Failed to start pi (${command}): ${err.message}. Set piCode.piCommand to the full path of the pi executable.`, 'error');
       this.postState();
     });
+    // A pi that stays up for a minute has clearly started fine, so the crash counter goes back to zero.
+    const settled = setTimeout(() => this.restarts.delete(task.id), 60_000);
     proc.on('exit', (code: number | null) => {
+      clearTimeout(settled);
       if (task.proc !== proc) return;
       task.alive = false;
       task.conv.markAborted();
       task.conv.system(`pi exited (${code ?? 'signal'})`, code ? 'error' : 'system');
       this.postState();
+      void this.autoRestart(task, proc, code);
     });
 
     try {
@@ -465,9 +474,59 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     this.postState();
   }
 
+  /**
+   * A pi that dies on its own is worth picking up again — the session file is still there, so the
+   * conversation survives. A clean exit, a task the user closed, and a third crash in a row are not.
+   */
+  private async autoRestart(task: Task, dead: PiProcess, code: number | null): Promise<void> {
+    if (code === 0) return;
+    if (!this.config().get<boolean>('autoRestart', true)) return;
+    if (this.tasks.get(task.id) !== task || task.proc !== dead) return;
+    const attempt = (this.restarts.get(task.id) || 0) + 1;
+    if (attempt > MAX_AUTO_RESTARTS) {
+      task.conv.system(`pi has exited ${MAX_AUTO_RESTARTS} times in a row; leaving it stopped. Run Pi Code: Restart Pi once the cause is fixed.`, 'warning');
+      this.postState();
+      return;
+    }
+    this.restarts.set(task.id, attempt);
+    const delay = attempt * this.restartDelayMs;
+    task.conv.system(`Restarting pi in ${delay / 1000}s (attempt ${attempt} of ${MAX_AUTO_RESTARTS})…`);
+    this.postState();
+    await new Promise(resolve => setTimeout(resolve, delay));
+    if (this.tasks.get(task.id) !== task || task.proc !== dead) return;
+    task.proc = undefined;
+    await this.spawn(task, { model: task.model, sessionFile: task.sessionFile, fresh: false });
+  }
+
+  /** The answer as pi itself renders it, which is cleaner than scraping the rendered chat. */
+  async copyLastAnswer(): Promise<void> {
+    const task = this.activeTask();
+    if (!task) return;
+    let text = '';
+    if (task.proc?.alive) {
+      const r = await task.proc.request({ type: 'get_last_assistant_text' });
+      if (r.success) text = typeof r.data === 'string' ? r.data : (r.data?.text || r.data?.content || '');
+    }
+    if (!text) {
+      const last = [...task.conv.messages].reverse().find(m => m.role === 'assistant' && m.text) as { text?: string } | undefined;
+      text = last?.text || '';
+    }
+    if (!text) {
+      vscode.window.showInformationMessage('There is no answer to copy yet.');
+      return;
+    }
+    await vscode.env.clipboard.writeText(text);
+    vscode.window.showInformationMessage('Last answer copied.');
+  }
+
+  showLogs(): void {
+    this.output.show(true);
+  }
+
   async restartActive(): Promise<void> {
     const task = this.activeTask();
     if (!task) return;
+    this.restarts.delete(task.id);
     task.proc?.kill();
     task.proc = undefined;
     task.conv.markAborted();
@@ -1412,6 +1471,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.branchSession', () => provider.cloneSession()),
     vscode.commands.registerCommand('piCode.openInTerminal', () => provider.openInTerminal()),
     vscode.commands.registerCommand('piCode.exportHtml', () => provider.exportActiveHtml()),
+    vscode.commands.registerCommand('piCode.copyLastAnswer', () => provider.copyLastAnswer()),
+    vscode.commands.registerCommand('piCode.showLogs', () => provider.showLogs()),
     vscode.workspace.onDidChangeConfiguration(e => {
       if (['autoCompaction', 'autoRetry', 'steeringMode', 'followUpMode'].some(k => e.affectsConfiguration(`piCode.${k}`)))
         void provider.applyModesToAll();

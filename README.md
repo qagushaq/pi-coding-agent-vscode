@@ -24,6 +24,7 @@ Requires pi ≥ 0.84 (the RPC protocol with `agent_settled`, `get_entries` and t
 - `@` in the composer opens a workspace file picker; `@relative/path` typed by hand is inlined too (size limit `piCode.contextFileMaxKb`, larger files are referenced by path for pi's `read` tool).
 - `Add File to Pi Chat` in the Explorer context menu.
 - Images: attach, paste or drop into the composer.
+- Up in an empty composer walks back through prompts already sent in this task, Down walks forward again; text you have not sent stays with its task when you switch tabs.
 
 **Control while pi is working**
 - Enter while the agent runs sends a *steer* message (delivered after the current tool calls); the *Queue* button sends a follow-up delivered when the agent finishes.
@@ -37,6 +38,9 @@ Requires pi ≥ 0.84 (the RPC protocol with `agent_settled`, `get_entries` and t
 - `Resume Session…` lists pi sessions recorded for this workspace (name, first prompt, message count, last modified).
 - Rename (also sets pi's session name), new session in the same task, compact context, export to HTML, copy session path, restart the pi process.
 - Footer shows session, model, thinking level, context usage, token counts and cost after each run.
+- Ctrl/Cmd+F searches the conversation in place, Enter and Shift+Enter step through the matches, Esc closes the bar.
+- `Copy Last Answer` puts pi's own rendering of the last answer on the clipboard; `Show Logs` opens the Pi Code output channel.
+- A pi that exits on its own is started again on the same session file, up to three times in a row (`piCode.autoRestart`).
 
 ## Rewind and editor context
 
@@ -124,6 +128,7 @@ Then run `Developer: Reload Window`. The Pi Code icon appears in the activity ba
 | `piCode.autoContext` | `"selection"` | What the active editor adds to every prompt: `off`, `file` (path and line) or `selection` (also inlines the selected text). |
 | `piCode.shareDiagnostics` | `true` | Send the errors and warnings VS Code reports for the active file. |
 | `piCode.notifyWhenDone` | `badge` | What to do when pi finishes while the chat is not visible: `off`, `badge`, `notification`. |
+| `piCode.autoRestart` | `true` | Start pi again when it exits on its own (up to three times in a row). |
 | `piCode.statusBar` | `true` | Keep a Pi Code readout in the status bar (state, cost, model and context in the tooltip). |
 | `piCode.autoCompaction` | `true` | Let pi compact the conversation on its own when the context window fills up. |
 | `piCode.autoRetry` | `true` | Let pi retry a request that failed on the provider side. |

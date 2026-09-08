@@ -2,7 +2,7 @@
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
   "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
-  "version": "0.5.5",
+  "version": "0.6.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -66,7 +66,7 @@
       },
       {
         "command": "piCode.resumeSession",
-        "title": "Resume Session…",
+        "title": "Resume Session\u2026",
         "category": "Pi Code",
         "icon": "$(history)"
       },
@@ -192,6 +192,16 @@
         "title": "Pi Code: Export Conversation to HTML",
         "category": "Pi Code",
         "icon": "$(export)"
+      },
+      {
+        "command": "piCode.copyLastAnswer",
+        "title": "Copy Last Answer",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.showLogs",
+        "title": "Show Logs",
+        "category": "Pi Code"
       }
     ],
     "menus": {
@@ -375,6 +385,10 @@
         {
           "command": "piCode.copySessionId",
           "when": "false"
+        },
+        {
+          "command": "piCode.copyLastAnswer",
+          "when": "piCode.hasTask"
         }
       ]
     },
@@ -537,6 +551,11 @@
             "Also show a notification with the first line of the answer."
           ],
           "description": "What to do when pi finishes while the chat is not visible."
+        },
+        "piCode.autoRestart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start pi again when it exits on its own (up to three times in a row)."
         }
       }
     }

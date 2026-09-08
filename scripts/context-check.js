@@ -11,14 +11,19 @@ let diagnostics = [];
 let config = { autoContext: 'selection', shareDiagnostics: true, contextFileMaxKb: 96 };
 
 const contextKeys = {};
+const notices = [];
+const clipboard = { text: '' };
 const vscodeStub = {
   DiagnosticSeverity: { Error: 0, Warning: 1, Information: 2, Hint: 3 },
   window: {
     get activeTextEditor() { return editor; },
     createStatusBarItem: () => ({ show() { this.visible = true; }, hide() { this.visible = false; }, dispose() {} }),
-    createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
+    createOutputChannel: () => ({ appendLine() {}, show() { this.shown = true; }, dispose() {} }),
+    showInformationMessage: (m) => { notices.push(m); return Promise.resolve(undefined); },
+    showWarningMessage: (m) => { notices.push(m); return Promise.resolve(undefined); },
   },
   languages: { getDiagnostics: () => diagnostics },
+  env: { clipboard: { writeText: async (t) => { clipboard.text = t; } } },
   workspace: {
     getConfiguration: () => ({ get: (k, d) => (config[k] !== undefined ? config[k] : d) }),
     workspaceFolders: [],
@@ -172,5 +177,38 @@ provider.renderStatus();
 ok(contextKeys['piCode.streaming'] === false && contextKeys['piCode.alive'] === false, 'a stopped task clears the streaming and alive keys');
 ok(contextKeys['piCode.hasTask'] === true, 'a stopped task is still a task');
 
+(async () => {
+// --- copying the last answer ---
+task.conv.system = () => {};
+task.conv.messages = [
+  { role: 'assistant', text: 'first answer' },
+  { role: 'tool', toolName: 'bash', output: 'x' },
+  { role: 'assistant', text: 'final answer' },
+];
+await provider.copyLastAnswer();
+ok(clipboard.text === 'final answer', 'the newest assistant answer lands on the clipboard');
+
+// --- picking a crashed pi back up ---
+const spawned = [];
+provider.restartDelayMs = 1;
+provider.spawn = async (t) => { spawned.push(t.id); t.alive = true; };
+const dead = {};
+task.proc = dead;
+await provider.autoRestart(task, dead, 0);
+ok(spawned.length === 0, 'a clean exit is not restarted');
+task.proc = dead;
+await provider.autoRestart(task, dead, 1);
+ok(spawned.length === 1, 'a crash brings pi back');
+for (let i = 0; i < 4; i++) { task.proc = dead; await provider.autoRestart(task, dead, 1); }
+ok(spawned.length === 3, 'the third crash in a row is the last one picked up');
+provider.restarts.delete('t1');
+task.proc = dead;
+config.autoRestart = false;
+await provider.autoRestart(task, dead, 1);
+ok(spawned.length === 3, 'auto-restart can be turned off');
+config.autoRestart = true;
+task.proc = undefined;
+
 console.log(failed ? `\nFAILED (${failed})` : '\ncontext check passed');
 process.exit(failed ? 1 : 0);
+})();

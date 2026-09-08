@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0
+
+- Prompt history in the composer: Up walks back through prompts already sent in this task, Down walks
+  forward and hands back what was being typed.
+- Unsent text stays with its task when you switch tabs.
+- Find in conversation (Ctrl/Cmd+F): live highlighting, match counter, Enter/Shift+Enter to step, Esc to close.
+- `Pi Code: Copy Last Answer` and `Pi Code: Show Logs`.
+- A pi that exits on its own is started again on the same session file after a growing delay, three times at
+  most; `piCode.autoRestart` turns it off.
+- Webview accessibility: the conversation is a live log region, controls are labelled, focus is visible.
+
 ## 0.5.5
 
 - A binary file attached or dropped into the chat is named and sized instead of having its bytes decoded as

@@ -28,7 +28,13 @@ function el(id) {
     addEventListener(name, fn) {
       (listeners[`${id}:${name}`] = listeners[`${id}:${name}`] || []).push(fn);
     },
-    querySelectorAll: () => [],
+    childNodes: [],
+    hidden: false,
+    select() {},
+    querySelectorAll(sel) {
+      const want = sel.replace('mark.', '');
+      return descendants(node).filter(n => n.nodeName === 'MARK' && (n.className === want || (n.classList && n.classList.has(want))));
+    },
     querySelector: () => null,
     focus() {},
     parentElement: null,
@@ -36,15 +42,60 @@ function el(id) {
   return node;
 }
 const nodes = {};
+
+/* A DOM tree just deep enough for the find-in-conversation code: text nodes, marks, fragments. */
+function textNode(value) { return { nodeName: '#text', nodeValue: value, parentNode: null }; }
+function classList(node) {
+  const set = new Set();
+  return { add: c => set.add(c), remove: c => set.delete(c), toggle: c => (set.has(c) ? set.delete(c) : set.add(c)), contains: c => set.has(c), has: c => set.has(c) };
+}
+function element(tag) {
+  const node = { nodeName: tag.toUpperCase(), childNodes: [], className: '', parentNode: null, scrollIntoView() {} };
+  node.classList = classList(node);
+  node.appendChild = child => { child.parentNode = node; node.childNodes.push(child); return child; };
+  node.replaceChild = (fresh, old) => {
+    const i = node.childNodes.indexOf(old);
+    const list = fresh.nodeName === '#fragment' ? fresh.childNodes : [fresh];
+    list.forEach(n => { n.parentNode = node; });
+    node.childNodes.splice(i, 1, ...list);
+  };
+  node.normalize = () => {};
+  Object.defineProperty(node, 'textContent', {
+    get() { return node.childNodes.map(c => (c.nodeName === '#text' ? c.nodeValue : c.textContent)).join(''); },
+    set(v) { node.childNodes = [textNode(v)]; node.childNodes[0].parentNode = node; },
+  });
+  return node;
+}
+function descendants(root) {
+  const out = [];
+  (function walk(n) { (n.childNodes || []).forEach(c => { out.push(c); walk(c); }); })(root);
+  return out;
+}
+global.NodeFilter = { SHOW_TEXT: 4 };
 global.document = {
   getElementById: id => (nodes[id] = nodes[id] || el(id)),
   querySelectorAll: () => [],
   querySelector: () => null,
+  createTextNode: textNode,
+  createElement: element,
+  createDocumentFragment: () => {
+    const frag = element('#fragment');
+    frag.nodeName = '#fragment';
+    return frag;
+  },
+  createTreeWalker(root) {
+    const list = descendants(root).filter(n => n.nodeName === '#text');
+    let i = -1;
+    return { nextNode: () => (++i < list.length ? list[i] : null) };
+  },
   addEventListener(name, fn) {
     (listeners[`document:${name}`] = listeners[`document:${name}`] || []).push(fn);
   },
 };
-global.window = { addEventListener(name, fn) { (listeners[`window:${name}`] = listeners[`window:${name}`] || []).push(fn); } };
+global.window = {
+  getSelection: () => '',
+  addEventListener(name, fn) { (listeners[`window:${name}`] = listeners[`window:${name}`] || []).push(fn); },
+};
 global.acquireVsCodeApi = () => ({ postMessage: m => posted.push(m) });
 global.FileReader = class {};
 
@@ -151,4 +202,70 @@ const idle = nodes.messages.innerHTML;
 const expectIdle = (cond, msg) => { if (!cond) { console.error(idle); throw new Error(`FAIL: ${msg}`); } console.log(`ok - ${msg}`); };
 expectIdle(idle.includes('data-rewind="0"') && idle.includes('data-rewind="1"'), 'rewind buttons numbered per user message');
 expectIdle((idle.match(/data-rewind=/g) || []).length === 2, 'only user messages get a rewind button');
+
+// --- prompt history and per-task drafts ---
+const fire = (key, name, extra) => {
+  const ev = Object.assign({ key, shiftKey: false, altKey: false, preventDefault() {}, target: nodes[key] }, extra || {});
+  (listeners[name] || []).forEach(fn => fn(ev));
+  return ev;
+};
+const input = nodes.input;
+input.value = 'first prompt';
+nodes.send.onclick();
+expectIdle(input.value === '' && posted.some(m => m.type === 'send' && m.text === 'first prompt'), 'sending clears the box and posts the prompt');
+input.value = 'second prompt';
+nodes.send.onclick();
+
+input.selectionStart = input.selectionEnd = 0;
+fire('ArrowUp', 'input:keydown');
+expectIdle(input.value === 'second prompt', 'Up recalls the last prompt');
+fire('ArrowUp', 'input:keydown');
+expectIdle(input.value === 'first prompt', 'Up again walks further back');
+input.selectionStart = input.selectionEnd = input.value.length;
+fire('ArrowDown', 'input:keydown');
+expectIdle(input.value === 'second prompt', 'Down walks forward again');
+fire('ArrowDown', 'input:keydown');
+expectIdle(input.value === '', 'Down past the newest restores what was being typed');
+
+const twoTasks = (activeTaskId) => ({
+  type: 'state', activeTaskId, settings: { sendOnEnter: true, showThinking: true },
+  tasks: ['t1', 't2'].map(id => ({ id, name: id, cwd: '/repo', alive: true, streaming: false, model: 'litellm/gpt-6-astra-max', tier: { family: 'gpt-6-astra', effort: 'max' }, thinking: 'off', widgets: {}, queue: { steering: [], followUp: [] }, changedFiles: [], messages: [] })),
+});
+input.value = 'draft for one';
+(listeners['input:input'] || []).forEach(fn => fn({}));
+dispatch(twoTasks('t2'));
+expectIdle(input.value === '', 'switching tasks parks the draft and shows an empty box');
+input.value = 'draft for two';
+(listeners['input:input'] || []).forEach(fn => fn({}));
+dispatch(twoTasks('t1'));
+expectIdle(input.value === 'draft for one', 'switching back brings the draft with it');
+dispatch(twoTasks('t2'));
+expectIdle(input.value === 'draft for two', 'each task keeps its own draft');
+input.value = '';
+(listeners['input:input'] || []).forEach(fn => fn({}));
+
+// --- find in conversation ---
+const para = document.createElement('div');
+para.appendChild(document.createTextNode('alpha beta alpha'));
+const inner = document.createElement('span');
+inner.appendChild(document.createTextNode('and ALPHA again'));
+para.appendChild(inner);
+nodes.messages.childNodes = [para];
+para.parentNode = nodes.messages;
+
+fire('f', 'document:keydown', { metaKey: true });
+expectIdle(nodes.find.hidden === false, 'Ctrl/Cmd+F opens the find bar');
+nodes.findInput.value = 'alpha';
+(listeners['findInput:input'] || []).forEach(fn => fn({}));
+expectIdle(nodes.findCount.textContent === '1 of 3', `every match is counted case-insensitively: ${nodes.findCount.textContent}`);
+expectIdle(nodes.messages.querySelectorAll('mark.hit').length === 3, 'matches are wrapped in marks');
+fire('Enter', 'findInput:keydown');
+expectIdle(nodes.findCount.textContent === '2 of 3', 'Enter steps to the next match');
+nodes.findInput.value = 'nothing here';
+(listeners['findInput:input'] || []).forEach(fn => fn({}));
+expectIdle(nodes.findCount.textContent === 'no matches', 'a miss says so');
+expectIdle(nodes.messages.querySelectorAll('mark.hit').length === 0, 'marks are cleaned up between searches');
+fire('Escape', 'findInput:keydown');
+expectIdle(nodes.find.hidden === true, 'Escape closes the find bar');
+
 console.log('webview check passed');
