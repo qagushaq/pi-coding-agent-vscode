@@ -2,7 +2,7 @@
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
   "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -522,6 +522,21 @@
           ],
           "default": "one-at-a-time",
           "description": "How queued follow-up messages are delivered once pi stops."
+        },
+        "piCode.notifyWhenDone": {
+          "type": "string",
+          "enum": [
+            "off",
+            "badge",
+            "notification"
+          ],
+          "default": "badge",
+          "enumDescriptions": [
+            "Say nothing.",
+            "Put a count on the Pi Code icon.",
+            "Also show a notification with the first line of the answer."
+          ],
+          "description": "What to do when pi finishes while the chat is not visible."
         }
       }
     }

@@ -110,6 +110,33 @@ provider.renderStatus();
 ok(status.visible === false, 'status bar can be turned off');
 config.statusBar = true;
 
+// --- posts reach both the sidebar and the editor tab ---
+const seen = { view: [], panel: [] };
+provider.view = { webview: { postMessage: m => seen.view.push(m) } };
+provider.panel = { webview: { postMessage: m => seen.panel.push(m) } };
+provider.post({ type: 'ping' });
+ok(seen.view.length === 1 && seen.panel.length === 1, 'a post reaches the sidebar and the editor tab exactly once');
+provider.view = undefined;
+provider.post({ type: 'ping' });
+ok(seen.panel.length === 2, 'a post still reaches the tab when the sidebar is closed');
+provider.panel = undefined;
+
+// --- finishing out of sight ---
+const badges = [];
+provider.view = { webview: { postMessage: () => {} }, visible: true, set badge(v) { badges.push(v); } };
+provider.announceDone(task);
+ok(provider.unseen.size === 0, 'a visible chat needs no badge');
+provider.view.visible = false;
+provider.announceDone(task);
+ok(provider.unseen.size === 1 && badges[badges.length - 1] && badges[badges.length - 1].value === 1, 'finishing out of sight raises a badge');
+config.notifyWhenDone = 'off';
+provider.unseen.clear();
+provider.announceDone(task);
+ok(provider.unseen.size === 0, 'the notice can be turned off');
+config.notifyWhenDone = 'badge';
+provider.view = undefined;
+provider.panel = undefined;
+
 // --- palette context keys ---
 task.alive = true;
 task.sessionFile = '/tmp/session.jsonl';

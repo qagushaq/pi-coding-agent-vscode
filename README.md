@@ -66,6 +66,10 @@ file, so the branch you left keeps its own entry in the sessions panel and can b
 Session` does the same at the current point without dropping anything - useful for trying a second approach
 while keeping the first.
 
+**When pi finishes out of sight.** A task that settles while the chat is hidden puts a count on the Pi Code
+icon, and `piCode.notifyWhenDone: notification` adds a notification with the first line of the answer and a
+button that opens the task. Opening or focusing the chat clears the count.
+
 **Terminal handoff.** `Pi Code: Continue Session in Terminal` opens the pi CLI on the same session file; the
 extension stops its own pi for that task first, because two processes writing one session file would fight.
 Restarting the task takes it back.
@@ -119,6 +123,7 @@ Then run `Developer: Reload Window`. The Pi Code icon appears in the activity ba
 | `piCode.preferFastVariants` | `false` | Prefer the `-fast` variant when switching family or effort. |
 | `piCode.autoContext` | `"selection"` | What the active editor adds to every prompt: `off`, `file` (path and line) or `selection` (also inlines the selected text). |
 | `piCode.shareDiagnostics` | `true` | Send the errors and warnings VS Code reports for the active file. |
+| `piCode.notifyWhenDone` | `badge` | What to do when pi finishes while the chat is not visible: `off`, `badge`, `notification`. |
 | `piCode.statusBar` | `true` | Keep a Pi Code readout in the status bar (state, cost, model and context in the tooltip). |
 | `piCode.autoCompaction` | `true` | Let pi compact the conversation on its own when the context window fills up. |
 | `piCode.autoRetry` | `true` | Let pi retry a request that failed on the provider side. |

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3
+
+- Fixed a bug that broke the chat in 0.4.0-0.5.2: the helper that fans a message out to the sidebar and the
+  editor tab called itself instead of the sidebar, so every update to the webview blew the stack.
+- A task that finishes while the chat is hidden puts a count on the Pi Code icon, optionally a notification
+  (`piCode.notifyWhenDone`).
+- In a multi-root workspace a new task asks which folder pi should work in instead of taking the first one.
+
 ## 0.5.2
 
 - The command palette only offers commands that apply right now: no Stop unless pi is working, no rewind or

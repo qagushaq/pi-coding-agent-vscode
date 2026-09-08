@@ -64,6 +64,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private status: vscode.StatusBarItem;
   private extStatus: vscode.StatusBarItem;
   private contextKeys: Record<string, boolean> = {};
+  private unseen = new Set<string>();
   private renderTimer?: NodeJS.Timeout;
   private output: vscode.OutputChannel;
   tree?: SessionTreeProvider;
@@ -85,7 +86,10 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     this.view = view;
     this.wire(view.webview);
     view.onDidChangeVisibility(() => {
-      if (view.visible) this.postState();
+      if (!view.visible) return;
+      this.unseen.clear();
+      this.renderBadge();
+      this.postState();
     });
   }
 
@@ -98,7 +102,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   private post(message: any): void {
-    this.post(message);
+    this.view?.webview.postMessage(message);
     this.panel?.webview.postMessage(message);
   }
 
@@ -120,7 +124,10 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       if (this.panel === panel) this.panel = undefined;
     });
     panel.onDidChangeViewState(e => {
-      if (e.webviewPanel.visible) this.postState();
+      if (!e.webviewPanel.visible) return;
+      this.unseen.clear();
+      this.renderBadge();
+      this.postState();
     });
     this.postState();
     for (const t of this.tasks.values()) this.postTaskInfo(t);
@@ -230,8 +237,19 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
   }
 
+  /** In a multi-root workspace the first folder is rarely the right guess, so ask which one to work in. */
+  private async pickCwd(): Promise<string> {
+    const folders = vscode.workspace.workspaceFolders || [];
+    if (folders.length < 2) return this.workspaceCwd();
+    const pick = await vscode.window.showQuickPick(
+      folders.map(f => ({ label: `$(folder) ${f.name}`, description: f.uri.fsPath, folder: f })),
+      { title: 'Which folder should pi work in?' },
+    );
+    return (pick?.folder || folders[0]).uri.fsPath;
+  }
+
   async newTask(opts: { name?: string; cwd?: string; sessionFile?: string; model?: string; messages?: UiMessage[] } = {}): Promise<Task> {
-    const cwd = opts.cwd || this.workspaceCwd();
+    const cwd = opts.cwd || (this.tasks.size ? await this.pickCwd() : this.workspaceCwd());
     const id = nextId('task');
     const task: Task = {
       id,
@@ -510,6 +528,32 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       task.name = firstUser.text.replace(/\s+/g, ' ').trim().slice(0, 40) || task.name;
     }
     this.postState();
+    this.announceDone(task);
+  }
+
+  /** Nudge the user when pi finishes while the chat is out of sight. */
+  private announceDone(task: Task): void {
+    const mode = this.config().get<string>('notifyWhenDone', 'badge');
+    if (mode === 'off') return;
+    if (this.view?.visible || this.panel?.visible) return;
+    this.unseen.add(task.id);
+    this.renderBadge();
+    if (mode !== 'notification') return;
+    const last = [...task.conv.messages].reverse().find(m => m.role === 'assistant');
+    const gist = (last?.text || '').replace(/\s+/g, ' ').trim().slice(0, 90);
+    void vscode.window
+      .showInformationMessage(`Pi finished in ${task.name}.${gist ? ` ${gist}` : ''}`, 'Show')
+      .then(answer => {
+        if (answer === 'Show') {
+          this.activeTaskId = task.id;
+          this.focus();
+        }
+      });
+  }
+
+  private renderBadge(): void {
+    if (!this.view) return;
+    this.view.badge = this.unseen.size ? { value: this.unseen.size, tooltip: `${this.unseen.size} task(s) finished` } : undefined;
   }
 
   private async handleExtensionUi(task: Task, req: RpcEvent): Promise<void> {
@@ -1173,6 +1217,8 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   async focus(): Promise<void> {
+    this.unseen.clear();
+    this.renderBadge();
     // Whoever the user is actually looking at wins: an open editor tab should not yank the sidebar out.
     if (this.panel?.visible) this.panel.reveal(this.panel.viewColumn, false);
     else if (this.panel && !this.view) this.panel.reveal(this.panel.viewColumn, false);
