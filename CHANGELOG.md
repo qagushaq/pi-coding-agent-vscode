@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0
+
+- The ⋯ menu now reaches everything the palette does: session timeline, branch into a copy, copy last answer,
+  modes, continue in terminal, find, logs. "Close task" from the menu closes the active task instead of
+  doing nothing.
+- A "↓ Latest" button appears when you scroll away from the end of the conversation, and is highlighted while
+  pi is still writing.
+- Finished answers get a copy button on hover, like code blocks.
+- Context usage is drawn as a small meter in the footer, amber past 70% and red past 90%.
+- Hover-only controls (copy, rewind) also appear on keyboard focus.
+
 ## 0.7.0
 
 - `Pi Code: Session Timeline…` shows the session as pi records it - prompts, answers, model and thinking-level

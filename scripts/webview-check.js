@@ -24,7 +24,7 @@ function el(id) {
     scrollTop: 0,
     scrollHeight: 100,
     clientHeight: 100,
-    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    classList: classList(),
     addEventListener(name, fn) {
       (listeners[`${id}:${name}`] = listeners[`${id}:${name}`] || []).push(fn);
     },
@@ -45,13 +45,13 @@ const nodes = {};
 
 /* A DOM tree just deep enough for the find-in-conversation code: text nodes, marks, fragments. */
 function textNode(value) { return { nodeName: '#text', nodeValue: value, parentNode: null }; }
-function classList(node) {
+function classList() {
   const set = new Set();
   return { add: c => set.add(c), remove: c => set.delete(c), toggle: c => (set.has(c) ? set.delete(c) : set.add(c)), contains: c => set.has(c), has: c => set.has(c) };
 }
 function element(tag) {
   const node = { nodeName: tag.toUpperCase(), childNodes: [], className: '', parentNode: null, scrollIntoView() {} };
-  node.classList = classList(node);
+  node.classList = classList();
   node.appendChild = child => { child.parentNode = node; node.childNodes.push(child); return child; };
   node.replaceChild = (fresh, old) => {
     const i = node.childNodes.indexOf(old);
@@ -169,6 +169,7 @@ expect(out.includes('exit 0'), 'direct bash block');
 expect(out.includes('401 blocked'), 'assistant error box');
 expect(out.includes('Thinking'), 'thinking block');
 expect(nodes.footer.innerHTML.includes('ctx 12%') && nodes.footer.innerHTML.includes('$0.123'), 'footer stats');
+expect(/class="ctxbar "?><i style="width:12%"/.test(nodes.footer.innerHTML), 'context usage also drawn as a meter');
 expect(nodes.footer.innerHTML.includes('xhigh fast'), 'footer shows effort and speed');
 expect(nodes.family.innerHTML.includes('GPT-6 Astra') && nodes.family.innerHTML.includes('selected'), 'family selector populated with current selected');
 expect(nodes.effort.innerHTML.includes('>xhigh<') && nodes.effort.innerHTML.includes('>max<'), 'effort ladder from the current family');
@@ -243,6 +244,23 @@ dispatch(twoTasks('t2'));
 expectIdle(input.value === 'draft for two', 'each task keeps its own draft');
 input.value = '';
 (listeners['input:input'] || []).forEach(fn => fn({}));
+
+// --- jump to latest, copy answer, context meter ---
+expectIdle(idle.includes('data-copymsg="a1"'), 'a finished answer offers a copy button');
+expectIdle(!out.includes('data-copymsg="a1"'), 'an answer still streaming does not');
+expectIdle(nodes.jump.hidden === true, 'the jump button stays hidden while the log fits');
+nodes.messages.scrollHeight = 1000; nodes.messages.scrollTop = 0; nodes.messages.clientHeight = 100;
+(listeners['messages:scroll'] || []).forEach(fn => fn({}));
+expectIdle(nodes.jump.hidden === false, 'scrolling away from the end shows the jump button');
+expectIdle(nodes.jump.classList.contains('unread') === false, 'an idle task does not nag with it');
+nodes.jump.onclick();
+expectIdle(nodes.messages.scrollTop === 1000, 'the jump button scrolls to the latest message');
+nodes.messages.scrollHeight = 100; nodes.messages.scrollTop = 0;
+
+const menuHtml = html;
+['timeline', 'branch', 'copyLast', 'modes', 'terminal', 'logs', 'find'].forEach(act => {
+  expectIdle(menuHtml.includes(`data-act="${act}"`), `the menu offers ${act}`);
+});
 
 // --- find in conversation ---
 const para = document.createElement('div');

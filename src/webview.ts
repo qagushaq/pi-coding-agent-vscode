@@ -46,15 +46,22 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
   .changed .file{display:flex;gap:8px;align-items:center;padding:2px 0 2px 12px;font-family:var(--mono);font-size:11px}
   .changed .file span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+  .msgwrap{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+  .jump{position:absolute;right:14px;bottom:10px;z-index:10;background:var(--card);border:1px solid var(--border);box-shadow:0 2px 8px rgba(0,0,0,.28);font-size:11px;padding:3px 9px;border-radius:12px;opacity:.92}
+  .jump:hover{opacity:1}
+  .jump.unread{background:var(--accent);color:var(--accentFg);border-color:transparent}
   .messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:10px 8px;display:flex;flex-direction:column;gap:10px;scroll-behavior:auto}
   .msg{max-width:100%;border-radius:8px;line-height:1.5;word-wrap:break-word;overflow-wrap:anywhere;min-width:0}
   .msg.user{align-self:flex-end;background:var(--vscode-input-background);border:1px solid var(--border);padding:8px 11px;max-width:92%;white-space:pre-wrap}
   .msg.user .imgs{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}.msg.user .imgs img{max-width:120px;max-height:90px;border-radius:5px;border:1px solid var(--border)}
   .msg.user{position:relative}
   .msg.user .rew{position:absolute;top:2px;right:100%;margin-right:6px;opacity:0;transition:opacity .12s;background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:2px 4px;border-radius:4px;line-height:1}
-  .msg.user:hover .rew{opacity:1}
+  .msg.user:hover .rew,.msg.user:focus-within .rew{opacity:1}
   .msg.user .rew:hover{background:var(--vscode-toolbar-hoverBackground,var(--border));color:var(--fg)}
-  .msg.assistant{align-self:stretch;padding:2px 4px}
+  .msg.assistant{align-self:stretch;padding:2px 4px;position:relative}
+  .msg.assistant .copyMsg{position:absolute;top:0;right:2px;font-size:10px;padding:1px 6px;opacity:0;transition:opacity .12s}
+  .msg.assistant:hover .copyMsg,.msg.assistant:focus-within .copyMsg{opacity:.85}
+  .msg.assistant .copyMsg:hover{opacity:1}
   .msg.assistant.error .md{opacity:.8}
   .msg .errbox{border:1px solid var(--err);color:var(--err);border-radius:6px;padding:6px 9px;margin-top:6px;font-family:var(--mono);font-size:11px;white-space:pre-wrap}
   .msg.system,.msg.warning,.msg.error,.msg.compaction{align-self:center;color:var(--muted);font-size:11px;text-align:center;padding:2px 8px;white-space:pre-wrap;max-width:100%}
@@ -66,7 +73,7 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
   .md code{font-family:var(--mono);font-size:.92em;background:var(--code);padding:1px 4px;border-radius:3px}
   .md pre{margin:0 0 8px;background:var(--code);border:1px solid var(--border);border-radius:6px;padding:8px 10px;overflow:auto;position:relative}
   .md pre code{background:transparent;padding:0;font-size:11.5px;white-space:pre}
-  .md pre .copy{position:absolute;top:4px;right:4px;font-size:10px;padding:2px 6px;opacity:0}.md pre:hover .copy{opacity:1}
+  .md pre .copy{position:absolute;top:4px;right:4px;font-size:10px;padding:2px 6px;opacity:0}.md pre:hover .copy,.md pre:focus-within .copy{opacity:1}
   .md table{border-collapse:collapse;margin:0 0 8px;font-size:12px}.md th,.md td{border:1px solid var(--border);padding:3px 7px}
   .md hr{border:0;border-top:1px solid var(--border);margin:8px 0}
 
@@ -99,6 +106,9 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
   .popup small{color:inherit;opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .footer{display:flex;gap:10px;padding:3px 8px 5px;font-size:11px;color:var(--muted);flex-wrap:wrap;flex:none;border-top:1px solid var(--border)}
   .footer span{white-space:nowrap}
+  .ctxbar{display:inline-block;width:44px;height:5px;border-radius:3px;background:var(--border);overflow:hidden;vertical-align:middle}
+  .ctxbar i{display:block;height:100%;background:var(--ok)}
+  .ctxbar.warn i{background:var(--warn)}.ctxbar.hot i{background:var(--err)}
   .find{display:flex;gap:4px;align-items:center;padding:4px 6px;border-bottom:1px solid var(--border);flex:none}
   .find input{flex:1;min-width:0;background:var(--vscode-input-background);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px}
   .find span{font-size:11px;color:var(--muted);white-space:nowrap}
@@ -123,6 +133,13 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
         <button data-act="newSession">New session (clear history)</button>
         <button data-act="rename">Rename task</button>
         <button data-act="compact">Compact context</button>
+        <button data-act="timeline">Session timeline…</button>
+        <button data-act="branch">Branch into a copy</button>
+        <button data-act="copyLast">Copy last answer</button>
+        <button data-act="modes">Modes…</button>
+        <button data-act="terminal">Continue in terminal</button>
+        <button data-act="find">Find in conversation</button>
+        <button data-act="logs">Show logs</button>
         <button data-act="exportHtml">Export session to HTML</button>
         <button data-act="copySessionPath">Copy session path</button>
         <button data-act="restart">Restart pi process</button>
@@ -138,7 +155,10 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
     <button id="findNext" title="Next match (Enter)" aria-label="Next match">↓</button>
     <button id="findClose" title="Close (Escape)" aria-label="Close find">×</button>
   </div>
-  <div class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite"></div>
+  <div class="msgwrap">
+    <div class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite"></div>
+    <button class="jump" id="jump" hidden title="Scroll to the latest message">↓ Latest</button>
+  </div>
   <div class="widget" id="widget" style="display:none"></div>
   <div class="queue" id="queue" style="display:none"></div>
   <div class="composer">
@@ -201,17 +221,29 @@ function renderChanged(){var t=active();var box=$('changed');if(!t||!t.changedFi
   [].forEach.call($('changedList').querySelectorAll('a[data-diff]'),function(a){a.onclick=function(){vscode.postMessage({type:'openDiff',path:a.dataset.diff});};});}
 
 function renderMessages(){var t=active();var el=messagesEl;var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
-  if(!t){el.innerHTML='<div class="empty">No task. Press ＋ to start one.</div>';return;}
-  if(!t.messages.length){el.innerHTML='<div class="empty">Session '+esc((t.sessionId||'').slice(0,8))+' in <b>'+esc(short(t.cwd)||t.cwd)+'</b><br>Type a prompt. <kbd>@</kbd> mentions a file, <kbd>/</kbd> lists commands, <kbd>!cmd</kbd> runs a shell command into context.<br>'+(state.settings.sendOnEnter?'<kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> newline.':'<kbd>Ctrl/Cmd+Enter</kbd> sends.')+'</div>';return;}
+  if(!t){el.innerHTML='<div class="empty">No task. Press ＋ to start one.</div>';$('jump').hidden=true;return;}
+  if(!t.messages.length){el.innerHTML='<div class="empty">Session '+esc((t.sessionId||'').slice(0,8))+' in <b>'+esc(short(t.cwd)||t.cwd)+'</b><br>Type a prompt. <kbd>@</kbd> mentions a file, <kbd>/</kbd> lists commands, <kbd>!cmd</kbd> runs a shell command into context.<br>'+(state.settings.sendOnEnter?'<kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> newline.':'<kbd>Ctrl/Cmd+Enter</kbd> sends.')+'</div>';$('jump').hidden=true;return;}
   var html='';var ui=0;t.messages.forEach(function(m){if(m.role==='user')m.userIndex=ui++;html+=renderMessage(m,t);});el.innerHTML=html;bindMessageHandlers();
   if(!$('find').hidden&&$('findInput').value){findHits=[];findAt=-1;runFind();}
-  if(atBottom||wasAtBottom)el.scrollTop=el.scrollHeight;wasAtBottom=false;}
+  if(atBottom||wasAtBottom)el.scrollTop=el.scrollHeight;wasAtBottom=false;renderJump();}
+
+/** Show the jump button while the reader is scrolled away from the end; highlight it when pi is still writing. */
+function renderJump(){
+  var el=messagesEl;var jump=$('jump');
+  var away=el.scrollHeight-el.scrollTop-el.clientHeight>60;
+  var t=active();
+  jump.hidden=!away;
+  if(away&&t&&t.streaming)jump.classList.add('unread');else jump.classList.remove('unread');
+}
+messagesEl.addEventListener('scroll',renderJump);
+$('jump').onclick=function(){messagesEl.scrollTop=messagesEl.scrollHeight;renderJump();inputEl.focus();};
 
 function renderMessage(m,t){
   if(m.role==='user'){var rw=(typeof m.userIndex==='number'&&!t.streaming)?'<button class="rew" data-rewind="'+m.userIndex+'" title="Rewind the conversation to just before this message">\u21b6</button>':'';
     return '<div class="msg user">'+rw+esc(m.text)+(m.images&&m.images.length?'<div class="imgs">'+m.images.map(function(i){return '<img src="data:'+esc(i.mimeType)+';base64,'+i.data+'">';}).join('')+'</div>':'')+'</div>';}
   if(m.role==='assistant'){var h='<div class="msg assistant'+(m.status==='error'?' error':'')+'">';
     if(m.thinking&&state.settings.showThinking){h+='<details class="think"'+(m.status==='streaming'&&!m.text?' open':'')+'><summary>Thinking'+(m.status==='streaming'&&!m.text?'…':'')+'</summary><div class="body">'+esc(m.thinking)+'</div></details>';}
+    if(m.text&&m.status!=='streaming')h+='<button class="copyMsg" data-copymsg="'+escAttr(m.id)+'" title="Copy this answer">copy</button>';
     h+='<div class="md'+(m.status==='streaming'?' cursor':'')+'">'+md(m.text)+'</div>';
     if(m.status==='error'&&m.error)h+='<div class="errbox">'+esc(m.error)+'</div>';
     if(m.status==='aborted')h+='<div class="hint">aborted</div>';
@@ -233,6 +265,10 @@ function renderTool(m){var open=openTools[m.id]!==undefined?openTools[m.id]:(m.s
   return '<div class="tool'+(m.status==='error'?' error':'')+(open?' open':'')+'" data-tool="'+esc(m.id)+'"><div class="head"><span class="dot '+(m.status==='running'?'running':m.status==='error'?'error':'')+'"></span><span class="name">'+esc(m.toolName)+'</span><span class="sum" title="'+esc(toolSummary(m))+'">'+esc(toolSummary(m))+'</span>'+acts+'</div><div class="body">'+body+'</div></div>';}
 
 function bindMessageHandlers(){[].forEach.call(messagesEl.querySelectorAll('.tool .head'),function(h){h.onclick=function(ev){if(ev.target.dataset.open){vscode.postMessage({type:'openFile',path:ev.target.dataset.open});return;}if(ev.target.dataset.diff){vscode.postMessage({type:'openDiff',path:ev.target.dataset.diff});return;}var box=h.parentElement;box.classList.toggle('open');openTools[box.dataset.tool]=box.classList.contains('open');};});
+  [].forEach.call(messagesEl.querySelectorAll('[data-copymsg]'),function(b){b.onclick=function(ev){ev.stopPropagation();
+    var t=active();var m=t&&t.messages.filter(function(x){return x.id===b.dataset.copymsg;})[0];
+    if(!m)return;vscode.postMessage({type:'copyText',text:m.text||''});
+    b.textContent='copied';setTimeout(function(){b.textContent='copy';},1200);};});
   [].forEach.call(messagesEl.querySelectorAll('.md .copy'),function(b){b.onclick=function(){vscode.postMessage({type:'copyText',text:b.parentElement.querySelector('code').textContent});b.textContent='copied';setTimeout(function(){b.textContent='copy';},1200);};});
   [].forEach.call(messagesEl.querySelectorAll('.md a[href]'),function(a){a.onclick=function(ev){ev.preventDefault();vscode.postMessage({type:'openLink',href:a.getAttribute('href')});};});
   [].forEach.call(messagesEl.querySelectorAll('.msg.user .rew'),function(b){b.onclick=function(){vscode.postMessage({type:'rewind',index:Number(b.dataset.rewind)});};});}
@@ -264,7 +300,8 @@ function renderFooter(){var t=active();var f=$('footer');if(!t){f.innerHTML='';r
     if(tier.effort)lbl+=' · '+esc(tier.effort)+(tier.fast?' fast':'');
     else if(t.thinking&&t.thinking!=='off')lbl+=' · '+esc(t.thinking);
     parts.push('<span>'+lbl+'</span>');}
-  var st=t.stats;if(st){if(st.contextUsage&&st.contextUsage.percent!=null)parts.push('<span title="context window">ctx '+Math.round(st.contextUsage.percent)+'%</span>');if(st.tokens)parts.push('<span title="input / output tokens">'+fmt(st.tokens.input)+' in · '+fmt(st.tokens.output)+' out</span>');if(st.cost!=null&&st.cost>0)parts.push('<span>$'+st.cost.toFixed(st.cost<1?3:2)+'</span>');}
+  var st=t.stats;if(st){if(st.contextUsage&&st.contextUsage.percent!=null){var pc=Math.round(st.contextUsage.percent);var cls=pc>=90?'hot':(pc>=70?'warn':'');
+    parts.push('<span title="context window"><span class="ctxbar '+cls+'"><i style="width:'+Math.max(2,Math.min(100,pc))+'%"></i></span> ctx '+pc+'%</span>');}if(st.tokens)parts.push('<span title="input / output tokens">'+fmt(st.tokens.input)+' in · '+fmt(st.tokens.output)+' out</span>');if(st.cost!=null&&st.cost>0)parts.push('<span>$'+st.cost.toFixed(st.cost<1?3:2)+'</span>');}
   f.innerHTML=parts.join('<span>·</span>');}
 function renderQueue(){var t=active();var q=t&&t.queue;var el=$('queue');var items=[];if(q){(q.steering||[]).forEach(function(x){items.push('steer: '+x);});(q.followUp||[]).forEach(function(x){items.push('queued: '+x);});}if(!items.length){el.style.display='none';return;}el.style.display='';el.innerHTML=items.map(function(x){return '<div>'+esc(x.slice(0,200))+'</div>';}).join('');}
 function renderWidget(){var t=active();var el=$('widget');var lines=t&&t.widgets?Object.keys(t.widgets).map(function(k){return t.widgets[k].join('\\n');}):[];if(!lines.length){el.style.display='none';return;}el.style.display='';el.textContent=lines.join('\\n');}
@@ -295,7 +332,9 @@ $('fast').onclick=function(){var t=active();vscode.postMessage({type:'setTier',f
 $('thinking').onchange=function(e){if(e.target.value)vscode.postMessage({type:'setThinking',level:e.target.value});};
 $('menuBtn').onclick=function(ev){ev.stopPropagation();$('menu').classList.toggle('open');};
 document.addEventListener('click',function(){$('menu').classList.remove('open');});
-[].forEach.call($('menu').querySelectorAll('button'),function(b){b.onclick=function(){$('menu').classList.remove('open');vscode.postMessage({type:b.dataset.act});};});
+[].forEach.call($('menu').querySelectorAll('button'),function(b){b.onclick=function(){$('menu').classList.remove('open');
+  if(b.dataset.act==='find'){openFind();return;}
+  vscode.postMessage({type:b.dataset.act});};});
 
 inputEl.addEventListener('keydown',function(e){
   if($('popup').classList.contains('open')){if(e.key==='ArrowDown'){popupIndex=Math.min(popupIndex+1,popupItems.length-1);renderPopup();e.preventDefault();return;}if(e.key==='ArrowUp'){popupIndex=Math.max(popupIndex-1,0);renderPopup();e.preventDefault();return;}if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();applyPopup();return;}if(e.key==='Escape'){closePopup();e.preventDefault();return;}}

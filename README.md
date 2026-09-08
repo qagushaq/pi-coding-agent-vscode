@@ -40,6 +40,7 @@ Requires pi ≥ 0.84 (the RPC protocol with `agent_settled`, `get_entries` and t
 - Footer shows session, model, thinking level, context usage, token counts and cost after each run.
 - Ctrl/Cmd+F searches the conversation in place, Enter and Shift+Enter step through the matches, Esc closes the bar.
 - `Copy Last Answer` puts pi's own rendering of the last answer on the clipboard; `Show Logs` opens the Pi Code output channel.
+- A "↓ Latest" button appears when you scroll away from the end while pi writes; finished answers have a copy button; the footer draws context usage as a meter.
 - `Session Timeline…` lists the session as pi records it (prompts, answers, model and thinking-level changes, compactions) and rewinds to any prompt.
 - `Next Model` / `Next Thinking Level` step through pi's own rings.
 - A pi that exits on its own is started again on the same session file, up to three times in a row (`piCode.autoRestart`).

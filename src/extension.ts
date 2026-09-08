@@ -195,7 +195,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
         await this.newTask();
         break;
       case 'closeTask':
-        this.closeTask(msg.taskId);
+        this.closeTask(msg.taskId || this.activeTaskId);
         break;
       case 'switchTask':
         if (this.tasks.has(msg.taskId)) {
@@ -228,6 +228,24 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
         break;
       case 'copySessionPath':
         await this.copySessionPath();
+        break;
+      case 'timeline':
+        await this.sessionTimeline();
+        break;
+      case 'branch':
+        await this.cloneSession();
+        break;
+      case 'copyLast':
+        await this.copyLastAnswer();
+        break;
+      case 'modes':
+        await this.pickModes();
+        break;
+      case 'terminal':
+        await this.openInTerminal();
+        break;
+      case 'logs':
+        this.showLogs();
         break;
       case 'setModel':
         await this.setModel(String(msg.modelId || ''));
