@@ -10,10 +10,37 @@ const script = /<script nonce="testnonce">([\s\S]*?)<\/script>/.exec(html)[1];
 
 const posted = [];
 const listeners = {};
+/* Splits a chunk of rendered HTML into its top-level elements, so the stub's children match what a browser
+   would build and the incremental message renderer takes the same path it takes in VS Code. */
+function splitTop(html) {
+  const out = [];
+  let depth = 0, start = 0, i = 0;
+  while (i < html.length) {
+    if (html[i] === '<') {
+      const close = html[i + 1] === '/';
+      const end = html.indexOf('>', i);
+      if (end < 0) break;
+      const tag = html.slice(i + (close ? 2 : 1), end).split(/[\s>]/)[0].toLowerCase();
+      const selfClosing = ['img', 'br', 'hr', 'input', 'kbd'].includes(tag) || html[end - 1] === '/';
+      if (!close && !selfClosing) { if (depth === 0) start = i; depth++; }
+      else if (close) { depth--; if (depth === 0) out.push(html.slice(start, end + 1)); }
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return out.length ? out : (html ? [html] : []);
+}
+function child(html) {
+  let value = html;
+  const node = { writes: 0, remove() {} };
+  Object.defineProperty(node, 'outerHTML', { get: () => value, set(v) { value = v; node.writes++; } });
+  return node;
+}
 function el(id) {
+  const kids = [];
   const node = {
     id,
-    innerHTML: '',
     textContent: '',
     value: '',
     style: {},
@@ -38,7 +65,14 @@ function el(id) {
     querySelector: () => null,
     focus() {},
     parentElement: null,
+    insertAdjacentHTML(_pos, html) { splitTop(html).forEach(h => kids.push(child(h))); },
+    removeChild(c) { const i = kids.indexOf(c); if (i >= 0) kids.splice(i, 1); },
   };
+  Object.defineProperty(node, 'children', { get: () => kids });
+  Object.defineProperty(node, 'innerHTML', {
+    get: () => kids.map(k => k.outerHTML).join(''),
+    set(v) { kids.length = 0; splitTop(v).forEach(h => kids.push(child(h))); },
+  });
   return node;
 }
 const nodes = {};
@@ -319,5 +353,26 @@ const written = render([{
   args: { path: '/repo/a.py', content: 'def f():\n    return 1\n' },
 }]);
 expectIdle(written.includes('<span class="k1">def</span>'), 'a written file is highlighted by its extension');
+
+// --- only the messages that changed are rewritten ---
+const stream = (text) => dispatch({
+  type: 'state',
+  activeTaskId: 'p1',
+  settings: { sendOnEnter: true, showThinking: true },
+  tasks: [{ id: 'p1', name: 'Patch', cwd: '/repo', alive: true, streaming: true, messages: [
+    { id: 'u1', role: 'user', text: 'question' },
+    { id: 'a1', role: 'assistant', status: 'streaming', text },
+  ] }],
+});
+stream('one');
+const first = nodes.messages.children[0];
+const second = nodes.messages.children[1];
+expectIdle(nodes.messages.children.length === 2, 'each message is its own node');
+stream('one two');
+expectIdle(nodes.messages.children[0] === first && first.writes === 0, 'an untouched message is left alone while the answer grows');
+expectIdle(nodes.messages.children[1] === second && second.writes === 1, 'the growing answer is the only node rewritten');
+expectIdle(nodes.messages.innerHTML.includes('one two'), 'the patched node carries the new text');
+stream('one two');
+expectIdle(second.writes === 1, 'an unchanged frame writes nothing at all');
 
 console.log('webview check passed');

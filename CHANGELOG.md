@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0
+
+- The conversation is no longer rebuilt from scratch on every state push (sixteen times a second while pi
+  streams). Each message's HTML is cached under a signature of the fields it is drawn from, and only the nodes
+  that actually changed are replaced: markdown, highlighting and diffs are computed once per message, and a
+  text selection made during a run survives the next frame.
+
 ## 0.9.0
 
 - Edits from the `edit` tool are shown as a real line diff: only the lines that changed, three lines of

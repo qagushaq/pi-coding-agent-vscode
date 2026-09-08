@@ -225,10 +225,34 @@ function renderChanged(){var t=active();var box=$('changed');if(!t||!t.changedFi
   [].forEach.call($('changedList').querySelectorAll('a[data-open]'),function(a){a.onclick=function(){vscode.postMessage({type:'openFile',path:a.dataset.open});};});
   [].forEach.call($('changedList').querySelectorAll('a[data-diff]'),function(a){a.onclick=function(){vscode.postMessage({type:'openDiff',path:a.dataset.diff});};});}
 
+/* The whole conversation used to be rebuilt on every state push - sixteen times a second while pi streams.
+   Each message's HTML is now cached under a signature of the fields it is drawn from, and only the nodes whose
+   HTML actually changed are replaced, so markdown, highlighting and diffs are computed once and a text
+   selection made during a run survives the next frame. */
+var htmlCache={};var htmlCacheSize=0;var lastRender={taskId:null,items:[]};
+function messageSig(m){return [m.role,m.status,m.userIndex,m.exitCode,m.path||'',m.toolName||'',(m.text||'').length,(m.thinking||'').length,(m.output||'').length,(m.error||'').length,(m.argsText||'').length,(m.command||'').length,(m.images||[]).length,m.args?(String(m.args.oldText||'').length+':'+String(m.args.newText||'').length+':'+String(m.args.content||'').length+':'+(m.argsSig||'')):'',openTools[m.id],state.settings.showThinking?1:0].join('|');}
+function messageHtml(m,t){var sig=messageSig(m);var hit=htmlCache[m.id];
+  if(hit&&hit.sig===sig)return hit.html;
+  var html=renderMessage(m,t);
+  if(htmlCacheSize>3000){htmlCache={};htmlCacheSize=0;}
+  if(!hit)htmlCacheSize++;
+  htmlCache[m.id]={sig:sig,html:html};return html;}
+/** Replaces only the message nodes whose HTML differs from the last frame; falls back to a full write when the
+    DOM and the remembered list have drifted apart (task switch, first draw, a rewind that dropped messages). */
+function patchMessages(items,taskId){var el=messagesEl;var prev=lastRender.taskId===taskId?lastRender.items:null;
+  lastRender={taskId:taskId,items:items};
+  if(!prev||!el.children||el.children.length!==prev.length){el.innerHTML=items.join('');return;}
+  var n=Math.min(prev.length,items.length);
+  for(var i=0;i<n;i++){if(prev[i]!==items[i])el.children[i].outerHTML=items[i];}
+  if(items.length>prev.length)el.insertAdjacentHTML('beforeend',items.slice(prev.length).join(''));
+  else while(el.children.length>items.length)el.removeChild(el.children[el.children.length-1]);}
+function resetMessages(html){lastRender={taskId:null,items:[]};messagesEl.innerHTML=html;}
+
 function renderMessages(){var t=active();var el=messagesEl;var atBottom=el.scrollHeight-el.scrollTop-el.clientHeight<40;
-  if(!t){el.innerHTML='<div class="empty">No task. Press ＋ to start one.</div>';$('jump').hidden=true;return;}
-  if(!t.messages.length){el.innerHTML='<div class="empty">Session '+esc((t.sessionId||'').slice(0,8))+' in <b>'+esc(short(t.cwd)||t.cwd)+'</b><br>Type a prompt. <kbd>@</kbd> mentions a file, <kbd>/</kbd> lists commands, <kbd>!cmd</kbd> runs a shell command into context.<br>'+(state.settings.sendOnEnter?'<kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> newline.':'<kbd>Ctrl/Cmd+Enter</kbd> sends.')+'</div>';$('jump').hidden=true;return;}
-  var html='';var ui=0;t.messages.forEach(function(m){if(m.role==='user')m.userIndex=ui++;html+=renderMessage(m,t);});el.innerHTML=html;bindMessageHandlers();
+  if(!t){resetMessages('<div class="empty">No task. Press ＋ to start one.</div>');$('jump').hidden=true;return;}
+  if(!t.messages.length){resetMessages('<div class="empty">Session '+esc((t.sessionId||'').slice(0,8))+' in <b>'+esc(short(t.cwd)||t.cwd)+'</b><br>Type a prompt. <kbd>@</kbd> mentions a file, <kbd>/</kbd> lists commands, <kbd>!cmd</kbd> runs a shell command into context.<br>'+(state.settings.sendOnEnter?'<kbd>Enter</kbd> sends, <kbd>Shift+Enter</kbd> newline.':'<kbd>Ctrl/Cmd+Enter</kbd> sends.')+'</div>');$('jump').hidden=true;return;}
+  var items=[];var ui=0;t.messages.forEach(function(m){if(m.role==='user')m.userIndex=ui++;items.push(messageHtml(m,t));});
+  patchMessages(items,t.id);bindMessageHandlers();
   if(!$('find').hidden&&$('findInput').value){findHits=[];findAt=-1;runFind();}
   if(atBottom||wasAtBottom)el.scrollTop=el.scrollHeight;wasAtBottom=false;renderJump();}
 

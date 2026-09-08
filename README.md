@@ -11,6 +11,7 @@ Requires pi ≥ 0.84 (the RPC protocol with `agent_settled`, `get_entries` and t
 **Chat**
 - Streaming markdown answers (headings, lists, tables, fenced code with copy button, links).
 - Fenced code is syntax highlighted from the theme's own colours; file edits are shown as a folded line diff with `+n -m` counts.
+- Only the messages that changed are redrawn while pi streams, so long conversations stay cheap and a text selection is not wiped mid-run.
 - Thinking blocks shown collapsed when the model streams reasoning (`piCode.showThinking`).
 - Model and thinking-level selectors fed by pi's own config; changes apply to the running session.
 - Errors from the model (401, 403, overload) are shown on the message, transient errors show pi's auto-retry progress.
