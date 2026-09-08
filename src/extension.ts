@@ -35,6 +35,42 @@ type Task = {
   modes?: PiModes;
 };
 
+type TimelineRow = {
+  label: string;
+  detail?: string;
+  when: string;
+  depth: number;
+  here: boolean;
+  branches: boolean;
+  fork?: { entryId: string; text: string };
+};
+
+/** One line of the session timeline, or nothing for entries not worth a row of their own. */
+export function timelineRow(entry: any, depth: number, here: boolean, branches: boolean): TimelineRow | undefined {
+  if (!entry) return undefined;
+  const when = new Date(entry.timestamp).toLocaleString();
+  const base = { when, depth, here, branches };
+  const oneLine = (text: string, limit = 80) => text.replace(/\s+/g, ' ').trim().slice(0, limit);
+  if (entry.type === 'model_change') return { ...base, label: `$(chip) model → ${entry.modelId}`, detail: entry.provider };
+  if (entry.type === 'thinking_level_change') return { ...base, label: `$(lightbulb) thinking → ${entry.thinkingLevel}` };
+  if (entry.type === 'compaction') return { ...base, label: '$(fold) context compacted', detail: oneLine(entry.summary || '', 140) };
+  if (entry.type === 'branch_summary') return { ...base, label: '$(git-branch) branch summary', detail: oneLine(entry.summary || '', 140) };
+  if (entry.type !== 'message') return undefined;
+  const role = entry.message?.role;
+  const text = messageText(entry.message);
+  if (role === 'user') return { ...base, label: `$(comment) ${oneLine(text) || '(empty prompt)'}`, fork: { entryId: entry.id, text } };
+  if (role === 'assistant') return { ...base, label: `$(hubot) ${oneLine(text) || '(tool calls only)'}` };
+  return undefined;
+}
+
+/** pi stores message content either as a plain string or as a list of typed parts. */
+function messageText(message: any): string {
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.filter((part: any) => part?.type === 'text' && typeof part.text === 'string').map((part: any) => part.text).join(' ');
+}
+
 /** The four pi runtime switches the extension mirrors from settings. */
 type PiModes = { autoCompaction: boolean; autoRetry: boolean; steeringMode: string; followUpMode: string };
 
@@ -994,6 +1030,12 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       target = pick?.p;
     }
     if (!target) return;
+    await this.forkTo(task, target);
+  }
+
+  /** Fork just before a user message and follow pi into the session file it opens for the branch. */
+  private async forkTo(task: Task, target: { entryId: string; text: string }): Promise<void> {
+    if (!task.proc?.alive) return;
     const r = await task.proc.request({ type: 'fork', entryId: target.entryId });
     if (!r.success || r.data?.cancelled) {
       task.conv.system(r.error || 'Rewind cancelled', 'warning');
@@ -1010,6 +1052,78 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     this.post({ type: 'setEditorText', text: typeof r.data?.text === 'string' ? r.data.text : target.text });
     await this.afterRun(task);
     this.focus();
+  }
+
+  /**
+   * The session as pi records it: not just the messages, but when the model or thinking level changed
+   * and where the context was compacted. Picking a prompt rewinds to just before it.
+   */
+  async sessionTimeline(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) {
+      vscode.window.showInformationMessage('Start a task first — the timeline comes from the running pi.');
+      return;
+    }
+    const r = await task.proc.request({ type: 'get_tree' });
+    if (!r.success) {
+      vscode.window.showWarningMessage(`Could not read the session timeline: ${r.error || 'unknown error'}`);
+      return;
+    }
+    const leafId: string | undefined = r.data?.leafId;
+    const rows: TimelineRow[] = [];
+    const walk = (nodes: any[], depth: number): void => {
+      for (const node of nodes || []) {
+        const row = timelineRow(node.entry, depth, node.entry?.id === leafId, (node.children || []).length > 1);
+        if (row) rows.push(row);
+        walk(node.children || [], row && row.branches ? depth + 1 : depth);
+      }
+    };
+    walk(r.data?.tree || [], 0);
+    if (!rows.length) {
+      vscode.window.showInformationMessage('This session has no entries yet.');
+      return;
+    }
+    const pick = await vscode.window.showQuickPick(
+      rows.map(row => ({
+        label: `${'  '.repeat(row.depth)}${row.label}`,
+        description: [row.when, row.here ? 'you are here' : '', row.branches ? 'branch point' : ''].filter(Boolean).join(' · '),
+        detail: row.detail,
+        row,
+      })),
+      { title: `Session timeline (${rows.length} entries)`, placeHolder: 'Pick a prompt to rewind to it, or Esc to just look' },
+    );
+    if (pick?.row.fork) await this.forkTo(task, pick.row.fork);
+  }
+
+  /** pi's own model ring, in the order its config lists them. */
+  async cycleModel(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    const r = await task.proc.request({ type: 'cycle_model' });
+    if (!r.success) {
+      vscode.window.showWarningMessage(`Could not switch model: ${r.error || 'unknown error'}`);
+      return;
+    }
+    await this.refreshState(task);
+    this.postState();
+    vscode.window.showInformationMessage(`Model: ${task.model || r.data?.model?.id || 'unknown'}`);
+  }
+
+  async cycleThinkingLevel(): Promise<void> {
+    const task = this.activeTask();
+    if (!task?.proc?.alive) return;
+    if (!task.levels.length) {
+      vscode.window.showInformationMessage('This model reports no thinking levels. Use Cycle Reasoning Effort instead.');
+      return;
+    }
+    const r = await task.proc.request({ type: 'cycle_thinking_level' });
+    if (!r.success) {
+      vscode.window.showWarningMessage(`Could not switch thinking level: ${r.error || 'unknown error'}`);
+      return;
+    }
+    await this.refreshState(task);
+    this.postState();
+    vscode.window.showInformationMessage(`Thinking level: ${task.thinking || 'off'}`);
   }
 
   async newSessionInActive(): Promise<void> {
@@ -1473,6 +1587,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('piCode.exportHtml', () => provider.exportActiveHtml()),
     vscode.commands.registerCommand('piCode.copyLastAnswer', () => provider.copyLastAnswer()),
     vscode.commands.registerCommand('piCode.showLogs', () => provider.showLogs()),
+    vscode.commands.registerCommand('piCode.sessionTimeline', () => provider.sessionTimeline()),
+    vscode.commands.registerCommand('piCode.cycleModel', () => provider.cycleModel()),
+    vscode.commands.registerCommand('piCode.cycleThinkingLevel', () => provider.cycleThinkingLevel()),
     vscode.workspace.onDidChangeConfiguration(e => {
       if (['autoCompaction', 'autoRetry', 'steeringMode', 'followUpMode'].some(k => e.affectsConfiguration(`piCode.${k}`)))
         void provider.applyModesToAll();

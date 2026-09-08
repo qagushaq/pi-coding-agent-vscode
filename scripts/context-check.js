@@ -50,7 +50,7 @@ Module._resolveFilename = function (request, ...rest) {
 };
 require.cache['vscode'] = { id: 'vscode', filename: 'vscode', loaded: true, exports: vscodeStub };
 
-const { PiCodeProvider } = require('../dist/extension');
+const { PiCodeProvider, timelineRow } = require('../dist/extension');
 const provider = new PiCodeProvider({ subscriptions: [], globalState: { get: () => undefined, update: async () => {} }, workspaceState: { get: () => undefined, update: async () => {} }, extensionUri: {} });
 const build = (cwd, attached) => provider.editorContext(cwd, attached || []);
 
@@ -176,6 +176,19 @@ task.alive = false;
 provider.renderStatus();
 ok(contextKeys['piCode.streaming'] === false && contextKeys['piCode.alive'] === false, 'a stopped task clears the streaming and alive keys');
 ok(contextKeys['piCode.hasTask'] === true, 'a stopped task is still a task');
+
+// --- session timeline rows (shapes taken from a live pi 0.85.1 session) ---
+const row = (entry, here = false, branches = false) => timelineRow(entry, 0, here, branches);
+const modelRow = row({ type: 'model_change', id: 'a', timestamp: '2026-09-08T09:17:33.780Z', provider: 'litellm', modelId: 'gpt-6-astra-max' });
+ok(modelRow.label.includes('gpt-6-astra-max') && modelRow.detail === 'litellm', 'a model change is a timeline row');
+ok(row({ type: 'thinking_level_change', id: 'b', timestamp: '2026-09-08T09:17:33.780Z', thinkingLevel: 'off' }).label.includes('thinking'), 'a thinking level change is a timeline row');
+const userRow = row({ type: 'message', id: 'u1', timestamp: '2026-09-08T09:17:33.780Z', message: { role: 'user', content: [{ type: 'text', text: 'say  ok' }] } });
+ok(userRow.fork && userRow.fork.entryId === 'u1' && userRow.fork.text === 'say  ok', 'a prompt carries its own rewind point');
+ok(userRow.label.includes('say ok'), 'whitespace in the label is collapsed');
+ok(!row({ type: 'message', id: 'a1', timestamp: '2026-09-08T09:17:33.780Z', message: { role: 'assistant', content: 'done' } }).fork, 'an answer is shown but is not a rewind point');
+ok(row({ type: 'message', id: 't1', timestamp: '2026-09-08T09:17:33.780Z', message: { role: 'tool', content: 'x' } }) === undefined, 'tool traffic stays out of the timeline');
+const comp = row({ type: 'compaction', id: 'c1', timestamp: '2026-09-08T09:17:33.780Z', summary: 'we did things', tokensBefore: 10 });
+ok(comp.label.includes('compacted') && comp.detail === 'we did things', 'a compaction is a timeline row with its summary');
 
 (async () => {
 // --- copying the last answer ---

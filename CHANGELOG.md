@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- `Pi Code: Session Timeline…` shows the session as pi records it - prompts, answers, model and thinking-level
+  changes, compactions - and rewinds to any prompt from the list.
+- `Pi Code: Next Model` and `Pi Code: Next Thinking Level` drive pi's own rings (`cycle_model`,
+  `cycle_thinking_level`), so every RPC command pi 0.85 offers is now used by the extension.
+
 ## 0.6.0
 
 - Prompt history in the composer: Up walks back through prompts already sent in this task, Down walks

@@ -2,7 +2,7 @@
   "name": "pi-coding-agent-vscode",
   "displayName": "Pi Code",
   "description": "VS Code client for the Pi coding agent: chat, tools, diffs, editor context, sessions",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "local",
   "engines": {
     "vscode": "^1.90.0"
@@ -202,6 +202,21 @@
         "command": "piCode.showLogs",
         "title": "Show Logs",
         "category": "Pi Code"
+      },
+      {
+        "command": "piCode.sessionTimeline",
+        "title": "Session Timeline\u2026",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.cycleModel",
+        "title": "Next Model",
+        "category": "Pi Code"
+      },
+      {
+        "command": "piCode.cycleThinkingLevel",
+        "title": "Next Thinking Level",
+        "category": "Pi Code"
       }
     ],
     "menus": {
@@ -389,6 +404,18 @@
         {
           "command": "piCode.copyLastAnswer",
           "when": "piCode.hasTask"
+        },
+        {
+          "command": "piCode.sessionTimeline",
+          "when": "piCode.alive"
+        },
+        {
+          "command": "piCode.cycleModel",
+          "when": "piCode.alive"
+        },
+        {
+          "command": "piCode.cycleThinkingLevel",
+          "when": "piCode.alive"
         }
       ]
     },
