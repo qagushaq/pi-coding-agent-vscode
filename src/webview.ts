@@ -88,6 +88,11 @@ export function renderWebviewHtml(cspSource: string, nonce: string): string {
   .tool .lbl{color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.06em;margin:6px 0 2px}.tool .lbl:first-child{margin-top:0}
   .diff{font-family:var(--mono);font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto}
   .diff .d{background:var(--del);display:block}.diff .a{background:var(--add);display:block}
+  .diff .u{display:block;opacity:.6}.diff .skip{display:block;color:var(--muted);font-style:italic;padding:1px 0}
+  .k1{color:var(--vscode-symbolIcon-keywordForeground,#c586c0)}
+  .s1{color:var(--vscode-debugTokenExpression-string,#ce9178)}
+  .n1{color:var(--vscode-debugTokenExpression-number,#b5cea8)}
+  .c1{color:var(--vscode-descriptionForeground,#7a9a6a);font-style:italic}
   .tool.error .head .name{color:var(--err)}
 
   .queue{padding:4px 8px;border-top:1px solid var(--border);font-size:11px;color:var(--muted);flex:none}
@@ -254,8 +259,8 @@ function renderMessage(m,t){
 
 function toolSummary(m){var a=m.args||{};if(m.toolName==='bash')return a.command||'';if(a.path||a.file_path)return short(a.path||a.file_path)+(a.offset?':'+a.offset:'');if(a.pattern)return a.pattern+(a.path?' in '+short(a.path):'');if(a.query)return a.query;if(m.argsText)return m.argsText.slice(0,120);var keys=Object.keys(a);return keys.length?keys.map(function(k){var v=a[k];return k+'='+(typeof v==='string'?v.slice(0,60):JSON.stringify(v));}).join(' ').slice(0,160):'';}
 function renderTool(m){var open=openTools[m.id]!==undefined?openTools[m.id]:(m.status==='error'||m.status==='running');var a=m.args||{};var body='';
-  if(m.toolName==='edit'&&(a.oldText!=null||a.newText!=null)){body+='<div class="lbl">Edit</div><div class="diff">'+String(a.oldText||'').split('\\n').map(function(l){return '<span class="d">- '+esc(l)+'</span>';}).join('')+String(a.newText||'').split('\\n').map(function(l){return '<span class="a">+ '+esc(l)+'</span>';}).join('')+'</div>';}
-  else if(m.toolName==='write'&&a.content!=null){body+='<div class="lbl">Write '+esc(short(a.path))+'</div><pre>'+esc(String(a.content).slice(0,6000))+'</pre>';}
+  if(m.toolName==='edit'&&(a.oldText!=null||a.newText!=null)){var dd=diffBody(String(a.oldText||''),String(a.newText||''));body+='<div class="lbl">Edit '+dd.counts+'</div><div class="diff">'+dd.html+'</div>';}
+  else if(m.toolName==='write'&&a.content!=null){body+='<div class="lbl">Write '+esc(short(a.path))+'</div><pre>'+hl(String(a.content).slice(0,6000),extLang(a.path))+'</pre>';}
   else if(m.toolName==='bash'){}
   else if(m.args){body+='<div class="lbl">Arguments</div><pre>'+esc(JSON.stringify(a,null,2).slice(0,4000))+'</pre>';}
   else if(m.argsText){body+='<div class="lbl">Arguments</div><pre>'+esc(m.argsText.slice(0,4000))+'</pre>';}
@@ -481,10 +486,60 @@ document.addEventListener('drop',function(e){e.preventDefault();var dt=e.dataTra
   if(uris.length){vscode.postMessage({type:'dropUris',uris:uris});return;}
   if(dt.files&&dt.files.length)addFiles(dt.files);});
 
+/* ---------- diffs ---------- */
+/** Longest-common-subsequence line diff; gives up on very large edits so a huge rewrite cannot stall the view. */
+function lineDiff(a,b){var A=a.split('\\n'),B=b.split('\\n');var m=A.length,n=B.length;if(m>400||n>400)return null;
+  var dp=[];for(var i=m;i>=0;i--){dp[i]=new Array(n+1);for(var j=n;j>=0;j--){dp[i][j]=(i===m||j===n)?0:(A[i]===B[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]));}}
+  var rows=[],x=0,y=0;
+  while(x<m&&y<n){if(A[x]===B[y]){rows.push(['=',A[x]]);x++;y++;}else if(dp[x+1][y]>=dp[x][y+1]){rows.push(['-',A[x]]);x++;}else{rows.push(['+',B[y]]);y++;}}
+  while(x<m)rows.push(['-',A[x++]]);while(y<n)rows.push(['+',B[y++]]);
+  return rows;}
+/** Renders a diff with three lines of context; untouched runs collapse into one grey marker. */
+function diffBody(oldText,newText){var rows=lineDiff(oldText,newText);
+  if(!rows){return {counts:'',html:oldText.split('\\n').map(function(l){return '<span class="d">- '+esc(l)+'</span>';}).join('')+newText.split('\\n').map(function(l){return '<span class="a">+ '+esc(l)+'</span>';}).join('')};}
+  var add=0,del=0;rows.forEach(function(r){if(r[0]==='+')add++;else if(r[0]==='-')del++;});
+  var keep={};for(var i=0;i<rows.length;i++){if(rows[i][0]!=='='){for(var k=Math.max(0,i-3);k<=Math.min(rows.length-1,i+3);k++)keep[k]=1;}}
+  var html='',skipped=0;
+  function flushSkip(){if(skipped){html+='<span class="skip">⋯ '+skipped+' unchanged line'+(skipped>1?'s':'')+'</span>';skipped=0;}}
+  for(var i=0;i<rows.length;i++){if(!keep[i]){skipped++;continue;}flushSkip();var r=rows[i];
+    html+='<span class="'+(r[0]==='+'?'a':r[0]==='-'?'d':'u')+'">'+esc((r[0]==='='?'  ':r[0]+' ')+r[1])+'</span>';}
+  flushSkip();
+  return {counts:(add?'+'+add:'')+(add&&del?' ':'')+(del?'-'+del:''),html:html||'<span class="skip">no line changes</span>'};}
+
+/* ---------- syntax highlighting ---------- */
+var HLFAM={js:'js',jsx:'js',mjs:'js',cjs:'js',javascript:'js',ts:'ts',tsx:'ts',typescript:'ts',java:'ts',c:'ts',h:'ts',cpp:'ts',cs:'ts',php:'js',py:'py',python:'py',rb:'rb',ruby:'rb',erb:'rb',go:'go',golang:'go',rs:'rs',rust:'rs',sh:'sh',bash:'sh',zsh:'sh',shell:'sh',console:'sh',json:'json',jsonc:'json',yml:'yml',yaml:'yml',css:'css',scss:'css',less:'css',sql:'sql'};
+var HLKW={
+  js:'async await break case catch class const continue default delete do else export extends false finally for from function if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while yield',
+  ts:'abstract any as async await boolean break case catch class const continue declare default delete do else enum export extends false finally for from function if implements import in instanceof interface let namespace new null number of private protected public readonly return static string super switch this throw true try type typeof undefined var void while yield',
+  py:'and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield',
+  rb:'alias and attr_accessor attr_reader begin break case class def defined do else elsif end ensure false for if in module next nil not or private protected public raise redo require require_relative rescue retry return self super then true unless until when while yield',
+  go:'break case chan const continue default defer else fallthrough false for func go goto if import interface map nil package range return select struct switch true type var',
+  rs:'as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self static struct super trait true type unsafe use where while',
+  sh:'case cd do done echo elif else esac exit export fi for function if in local return set source then unset until while',
+  json:'true false null',yml:'true false null yes no',css:'important and not only from to',
+  sql:'and as asc by create delete desc distinct drop from group having in insert into is join left limit not null on or order outer right select set table union update values where'};
+var HLHASH={py:1,rb:1,sh:1,yml:1};
+/** A file extension is as good a language hint as a fence label. */
+function extLang(p){var m=/\\.([A-Za-z0-9]+)$/.exec(String(p||''));return m?m[1]:'';}
+/** Hand-rolled scanner: comments, strings, numbers and keywords. Enough colour to read a block, no library. */
+function hl(code,lang){var fam=HLFAM[String(lang||'').toLowerCase()];if(!fam)return esc(code);
+  var kw={};(HLKW[fam]||'').split(' ').forEach(function(k){if(k)kw[k]=1;});
+  var hash=HLHASH[fam]===1,out='',i=0,n=code.length;
+  function isId(c){return /[A-Za-z0-9_$]/.test(c);}
+  while(i<n){var c=code.charAt(i),j;
+    if((c==='/'&&code.charAt(i+1)==='/')||(hash&&c==='#')||(fam==='sql'&&c==='-'&&code.charAt(i+1)==='-')){j=code.indexOf('\\n',i);if(j<0)j=n;out+='<span class="c1">'+esc(code.slice(i,j))+'</span>';i=j;continue;}
+    if(c==='/'&&code.charAt(i+1)==='*'){j=code.indexOf('*/',i+2);j=j<0?n:j+2;out+='<span class="c1">'+esc(code.slice(i,j))+'</span>';i=j;continue;}
+    if(c==='"'||c==="'"||c===BT){j=i+1;while(j<n){var d=code.charAt(j);if(d==='\\\\'){j+=2;continue;}if(d===c){j++;break;}if(d==='\\n'&&c!==BT)break;j++;}
+      out+='<span class="s1">'+esc(code.slice(i,j))+'</span>';i=j;continue;}
+    if(/[0-9]/.test(c)){j=i;while(j<n&&/[0-9a-fA-FxX._]/.test(code.charAt(j)))j++;out+='<span class="n1">'+esc(code.slice(i,j))+'</span>';i=j;continue;}
+    if(isId(c)){j=i;while(j<n&&isId(code.charAt(j)))j++;var w=code.slice(i,j);out+=kw[w]?'<span class="k1">'+esc(w)+'</span>':esc(w);i=j;continue;}
+    out+=esc(c);i++;}
+  return out;}
+
 /* ---------- markdown ---------- */
 var BT='\\x60';
 function md(src){if(!src)return '';var blocks=[];var fence=new RegExp(BT+BT+BT+'([\\\\w+-]*)[^\\\\n]*\\\\n([\\\\s\\\\S]*?)(?:'+BT+BT+BT+'|$)','g');
-  var text=src.replace(fence,function(_,lang,code){blocks.push('<pre><button class="copy">copy</button><code class="lang-'+esc(lang)+'">'+esc(code.replace(/\\n$/,''))+'</code></pre>');return '\\u0000'+(blocks.length-1)+'\\u0000';});
+  var text=src.replace(fence,function(_,lang,code){blocks.push('<pre><button class="copy">copy</button><code class="lang-'+esc(lang)+'">'+hl(code.replace(/\\n$/,''),lang)+'</code></pre>');return '\\u0000'+(blocks.length-1)+'\\u0000';});
   var lines=text.split('\\n');var out=[];var para=[];var list=null;var quote=[];
   function flushPara(){if(para.length){out.push('<p>'+inline(para.join('\\n'))+'</p>');para=[];}}
   function flushList(){if(list){out.push('<'+list.tag+'>'+list.items.map(function(i){return '<li>'+inline(i)+'</li>';}).join('')+'</'+list.tag+'>');list=null;}}

@@ -159,11 +159,13 @@ expect(out.includes('<h1>Title</h1>'), 'markdown heading');
 expect(out.includes('<strong>bold</strong>') && out.includes('<code>code</code>'), 'inline bold and code');
 expect(out.includes('<ul><li>one</li><li>two</li></ul>'), 'bullet list');
 expect(out.includes('<ol><li>first</li><li>second</li></ol>'), 'ordered list');
-expect(out.includes('class="lang-ruby">puts &quot;hi&quot; &lt;b&gt;</code>'), 'fenced code escaped with language');
+expect(out.includes('class="lang-ruby">puts <span class="s1">&quot;hi&quot;</span> &lt;b&gt;</code>'), 'fenced code escaped, highlighted and tagged with its language');
 expect(out.includes('<table>') && out.includes('<td>2</td>'), 'table');
 expect(out.includes('<blockquote>quote</blockquote>'), 'blockquote');
 expect(out.includes('<a href="https://x.y">link</a>'), 'link');
 expect(out.includes('class="d">- b</span>') && out.includes('class="a">+ c</span>'), 'edit tool renders as diff');
+expect(out.includes('class="u">  a</span>'), 'unchanged lines kept as context');
+expect(out.includes('<div class="lbl">Edit +1 -1</div>'), 'diff header counts the changed lines');
 expect(out.includes('app/models/user.rb') && !out.includes('/repo/app/models/user.rb</span>'), 'paths shortened relative to cwd');
 expect(out.includes('exit 0'), 'direct bash block');
 expect(out.includes('401 blocked'), 'assistant error box');
@@ -285,5 +287,37 @@ expectIdle(nodes.findCount.textContent === 'no matches', 'a miss says so');
 expectIdle(nodes.messages.querySelectorAll('mark.hit').length === 0, 'marks are cleaned up between searches');
 fire('Escape', 'findInput:keydown');
 expectIdle(nodes.find.hidden === true, 'Escape closes the find bar');
+
+// --- highlighting and diff folding, rendered through a fresh state ---
+const render = (messages) => {
+  dispatch({
+    type: 'state',
+    activeTaskId: 'd1',
+    settings: { sendOnEnter: true, showThinking: true },
+    tasks: [{ id: 'd1', name: 'Diff', cwd: '/repo', alive: true, messages }],
+  });
+  return nodes.messages.innerHTML;
+};
+const fenced = render([{ id: 'm1', role: 'assistant', status: 'done', text: '```js\nvar x = 1; // note\n```' }]);
+expectIdle(fenced.includes('<span class="k1">var</span>'), 'keywords coloured in a known language');
+expectIdle(fenced.includes('<span class="c1">// note</span>'), 'comments coloured in a known language');
+expectIdle(fenced.includes('<span class="n1">1</span>'), 'numbers coloured in a known language');
+const plain = render([{ id: 'm2', role: 'assistant', status: 'done', text: '```\nvar x = 1\n```' }]);
+expectIdle(plain.includes('lang-">var x = 1'), 'a fence with no language stays plain');
+
+const same = Array.from({ length: 20 }, (_, i) => `line ${i}`);
+const folded = render([{
+  id: 'm3', role: 'tool', toolName: 'edit', status: 'done', path: '/repo/a.rb',
+  args: { path: '/repo/a.rb', oldText: same.join('\n'), newText: same.concat(['tail']).join('\n') },
+}]);
+expectIdle(folded.includes('class="skip">⋯ 17 unchanged lines</span>'), 'untouched runs fold into one marker');
+expectIdle(folded.includes('<div class="lbl">Edit +1</div>'), 'a pure addition counts only additions');
+expectIdle(!folded.includes('class="d">'), 'a pure addition shows no removed lines');
+
+const written = render([{
+  id: 'm4', role: 'tool', toolName: 'write', status: 'done', path: '/repo/a.py',
+  args: { path: '/repo/a.py', content: 'def f():\n    return 1\n' },
+}]);
+expectIdle(written.includes('<span class="k1">def</span>'), 'a written file is highlighted by its extension');
 
 console.log('webview check passed');

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- Edits from the `edit` tool are shown as a real line diff: only the lines that changed, three lines of
+  context around them, longer untouched runs folded into one marker, and a `+n -m` count in the header.
+- Fenced code blocks, and the preview of a written file, are syntax highlighted - comments, strings, numbers
+  and keywords for the common languages, coloured from the theme, no library and no CDN.
+
 ## 0.8.0
 
 - The ⋯ menu now reaches everything the palette does: session timeline, branch into a copy, copy last answer,
