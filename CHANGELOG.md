@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.0
+
+- The state message that crosses to the sidebar no longer carries the history of tasks the sidebar does not
+  draw: a background task travels without its messages, changed files and queue.
+- Workspace storage is written on a two-second beat instead of once per frame, and flushed when the window
+  closes, so a streaming run no longer hammers the extension's state store.
+
 ## 0.10.0
 
 - The conversation is no longer rebuilt from scratch on every state push (sixteen times a second while pi

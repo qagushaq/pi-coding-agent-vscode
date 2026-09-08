@@ -105,6 +105,7 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
   private contextKeys: Record<string, boolean> = {};
   private unseen = new Set<string>();
   private restarts = new Map<string, number>();
+  private persistTimer: ReturnType<typeof setTimeout> | undefined;
   private restartDelayMs = 2000;
   private renderTimer?: NodeJS.Timeout;
   private output: vscode.OutputChannel;
@@ -601,7 +602,25 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
     this.activeTaskId = ids[Math.min(activeIndex, ids.length - 1)] || ids[0];
   }
 
+  /** Writes the pending task state out now, whatever the debounce was waiting for. */
+  flushPersist(): void {
+    this.persistTasks();
+  }
+
+  /** Storage writes ride a slow beat of their own; a streaming run must not write the workspace state 16x/s. */
+  private schedulePersist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined;
+      this.persistTasks();
+    }, 2000);
+  }
+
   private persistTasks(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = undefined;
+    }
     const tasks: PersistedTask[] = [...this.tasks.values()].map(t => ({
       name: t.name,
       cwd: t.cwd,
@@ -1487,11 +1506,13 @@ export class PiCodeProvider implements vscode.WebviewViewProvider, vscode.Dispos
       stats: t.stats,
       widgets: t.widgets,
       lastError: t.lastError,
-      messages: t.conv.messages,
-      changedFiles: t.conv.changedFiles,
-      queue: t.conv.queue,
+      // The sidebar draws only the active task, so a background task's history stays out of the message that
+      // crosses to the webview sixteen times a second.
+      messages: t.id === this.activeTaskId ? t.conv.messages : [],
+      changedFiles: t.id === this.activeTaskId ? t.conv.changedFiles : [],
+      queue: t.id === this.activeTaskId ? t.conv.queue : undefined,
     }));
-    this.persistTasks();
+    this.schedulePersist();
     this.tree?.setOpen([...this.tasks.values()].filter(t => t.sessionFile).map(t => ({ file: t.sessionFile!, taskId: t.id, streaming: t.conv.streaming })));
     this.renderStatus();
     this.post({
@@ -1589,6 +1610,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider('piCode.chatView', provider, { webviewOptions: { retainContextWhenHidden: true } }),
     view,
     { dispose: () => watcher.close() },
+    { dispose: () => provider.flushPersist() }, // the debounced write must not be lost when the window closes
     vscode.commands.registerCommand('piCode.newTask', () => provider.newTask()),
     vscode.commands.registerCommand('piCode.stopTask', () => provider.stopActive()),
     vscode.commands.registerCommand('piCode.restartTask', () => provider.restartActive()),

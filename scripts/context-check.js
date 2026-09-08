@@ -147,6 +147,30 @@ provider.post({ type: 'ping' });
 ok(seen.panel.length === 2, 'a post still reaches the tab when the sidebar is closed');
 provider.panel = undefined;
 
+// --- the state that crosses to the webview, and how often storage is written ---
+const writes = [];
+const savedActive = provider.activeTaskId;
+provider.context.workspaceState = { get: () => undefined, update: async () => { writes.push(1); } };
+const conv = (text) => ({ messages: [{ id: 'm', role: 'assistant', text }], changedFiles: ['a.rb'], queue: undefined, streaming: false });
+const savedTasks = provider.tasks;
+provider.tasks = new Map();
+provider.tasks.set('t-a', { id: 't-a', name: 'A', cwd: '/repo', alive: true, tier: {}, conv: conv('active answer') });
+provider.tasks.set('t-b', { id: 't-b', name: 'B', cwd: '/repo', alive: true, tier: {}, conv: conv('background answer') });
+provider.activeTaskId = 't-a';
+const states = [];
+provider.view = { webview: { postMessage: m => states.push(m) } };
+provider.postState();
+provider.view = undefined;
+const sent = states[states.length - 1];
+const byId = Object.fromEntries(sent.tasks.map(t => [t.id, t]));
+ok(byId['t-a'].messages.length === 1, 'the active task travels with its messages');
+ok(byId['t-b'].messages.length === 0 && byId['t-b'].changedFiles.length === 0, 'a background task travels empty');
+ok(writes.length === 0, 'a state push does not write workspace storage on the spot');
+provider.flushPersist();
+ok(writes.length === 2, 'the flush writes the task list and the active index');
+provider.tasks = savedTasks;
+provider.activeTaskId = savedActive;
+
 // --- finishing out of sight ---
 const badges = [];
 provider.view = { webview: { postMessage: () => {} }, visible: true, set badge(v) { badges.push(v); } };
